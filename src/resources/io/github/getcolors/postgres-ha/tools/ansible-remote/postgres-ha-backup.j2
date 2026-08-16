@@ -14,7 +14,7 @@ if [ "$(id -un)" != postgres ]; then
   exec sudo -n -u postgres -- "$0" "$@"
 fi
 
-if ! curl -fsS -o /dev/null --max-time 5 "$PATRONI_URL/primary"; then
+if ! curl -fs -o /dev/null --max-time 5 "$PATRONI_URL/primary"; then
   echo "postgres-ha-backup: {{ inventory_hostname }} does not hold the leader lock; nothing to do"
   exit 0
 fi
