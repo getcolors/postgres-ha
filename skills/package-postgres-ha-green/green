@@ -53,7 +53,7 @@
 ;; cannot resolve its own library says so rather than inventing a SHA or
 ;; silently falling back to whatever is lying around. `bb pin` refuses to stamp
 ;; a dirty or unpushed HEAD for the same reason.
-(def ^:private postgres-ha-sha "918cf8186efa04c124425a68a30efe506472389a")
+(def ^:private postgres-ha-sha "f3edbac2e56b5115c47d662af32e08ef0fda92fe")
 
 (def ^:private postgres-ha-git-url "https://github.com/getcolors/postgres-ha.git")
 (def ^:private green-git-url "https://github.com/getcolors/green.git")
