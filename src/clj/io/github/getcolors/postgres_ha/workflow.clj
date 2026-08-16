@@ -43,6 +43,7 @@
    :haproxy-primary-port 5432
    :haproxy-replica-port 5433
    :haproxy-stats-port 7000
+   :client-connect-timeout-seconds 5
    :backup-stanza "main"
    :backup-retention-full 4
    :backup-r2-region "auto"

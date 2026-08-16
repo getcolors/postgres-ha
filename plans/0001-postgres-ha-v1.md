@@ -135,6 +135,45 @@ The records must not be proxied. Cloudflare's proxy speaks HTTP; desired-state
 validation refuses `cloudflare-proxied: true` rather than letting it fail as a
 connection reset months later.
 
+### What this costs, measured
+
+A failover was exercised against the live cluster by powering the leader's
+droplet off through the DigitalOcean API. The promotion and the endpoint both
+behaved as designed — but the first client probe afterwards hung, and that
+exposed the one real cost of this choice.
+
+A machine that is **powered off** does not refuse connections; it black-holes
+the SYN. libpq's default `connect_timeout` is unset, so it waits out the OS TCP
+retry — roughly two minutes — before moving to the next address in the record
+set. Measured over ten probes with one dead node still resolving, and
+`connect_timeout=5`:
+
+| resolved order | probes | latency |
+|---|---|---|
+| a live address first | 6 | ~80 ms |
+| the dead address first | 4 | ~5090 ms |
+| **failed** | **0** | — |
+
+glibc rotates the addresses it returns, so about one connection in three pays
+the bound while a node is down, and none fail.
+
+So this endpoint requires exactly one client parameter — `connect_timeout` —
+which is now `client-connect-timeout-seconds` in desired state, documented
+everywhere the endpoint is documented, and asserted by an acceptance check that
+probes `3 × nodes` times and requires every probe to reach a read-write primary
+inside `connect_timeout × (nodes − 1) + 10s`.
+
+That is a smaller ask than the rejected `target_session_attrs` alternative, and
+worth being precise about why: `connect_timeout` is a timeout. It needs no
+knowledge of Patroni, of roles, or of which node is primary, and every driver
+has it. `target_session_attrs=read-write` asks the client to implement the
+*selection*, which is the mechanism itself.
+
+It is also worth being clear how narrow the case is. The pause happens only on
+total node loss. A crashed PostgreSQL, a stopped Patroni, an OOM kill or a
+service restart all leave the node's HAProxy answering and forwarding to the
+new leader, and the endpoint does not pause at all.
+
 ## 5. Backup tool — pgBackRest
 
 `repo1-type=s3` against R2's S3-compatible endpoint with `uri-style=path`. A

@@ -42,9 +42,17 @@ failover**: no DNS call, no cloud API call, no credential needed at the moment
 the cluster is degraded.
 
 ```sh
-psql -h pg-ha.example.com -p 5432 -U postgres -d appdb    # always writable
-psql -h pg-ha.example.com -p 5433 -U postgres -d appdb    # a standby
+psql "host=pg-ha.example.com port=5432 user=postgres dbname=appdb connect_timeout=5"
+psql "host=pg-ha.example.com port=5433 user=postgres dbname=appdb connect_timeout=5"
 ```
+
+**`connect_timeout` is required, not decoration.** A node that is powered off
+black-holes the connection rather than refusing it, and libpq's default is to
+wait out the OS TCP retry — about two minutes — before trying the next address
+in the set. With it set, one dead node costs at most that timeout on the
+connections that happen to resolve it first, and none fail. Measured on a live
+cluster with a node powered off: 6 of 10 probes in ~80 ms, 4 in ~5.1 s, zero
+failures.
 
 ## Operating it
 

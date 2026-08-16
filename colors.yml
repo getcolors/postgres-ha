@@ -35,6 +35,13 @@ haproxy-primary-port: 5432
 haproxy-replica-port: 5433
 haproxy-stats-port: 7000
 
+# The endpoint resolves to every node. A node that is powered off black-holes
+# the connection rather than refusing it, and libpq's default is to wait out the
+# OS TCP retry — about two minutes — before trying the next address. This is the
+# value the documentation tells clients to use and the value acceptance probes
+# with, held here so the two cannot drift apart.
+client-connect-timeout-seconds: 5
+
 pgbackrest-package-version: 2.59.0-1.pgdg24.04+1
 backup-stanza: main
 backup-oncalendar: "*-*-* 01:00:00"

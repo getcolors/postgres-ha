@@ -91,6 +91,7 @@ node, which is the entire point of having three.
 | `cloudflare-zone` | — | must contain `cluster-host` |
 | `cloudflare-proxied` | `false` | must stay false |
 | `cloudflare-record-ttl` | `60` | `1` for automatic, otherwise 60..86400 |
+| `client-connect-timeout-seconds` | `5` | the `connect_timeout` clients must set |
 
 `haproxy-primary-port` is allowed to equal `postgres-port`, and by default
 does: PostgreSQL binds the private VPC address, HAProxy the public address and
@@ -99,6 +100,26 @@ port collision is refused.
 
 `cloudflare-proxied: true` is refused rather than accepted and left to fail
 later — Cloudflare's proxy speaks HTTP, not the PostgreSQL wire protocol.
+
+`client-connect-timeout-seconds` is desired state rather than advice in a
+README because getting it wrong turns a survivable node loss into an outage for
+a share of new connections. The endpoint resolves to every node; a node that is
+**powered off** black-holes the connection instead of refusing it, and libpq's
+default is to wait out the OS TCP retry — about two minutes — before trying the
+next address. Every client should connect with it:
+
+```sh
+psql "host=pg-ha.example.com port=5432 user=postgres dbname=appdb connect_timeout=5"
+```
+
+Measured on a live cluster with one node powered off, ten probes: six reached a
+primary in ~80 ms (a live address resolved first), four in ~5.1 s (the dead
+address first, bounded, then the next), none failed. glibc rotates the resolved
+order, so about one connection in three pays the bound while a node is down.
+
+This only applies to total node loss. A crashed PostgreSQL, a stopped Patroni
+or a service restart leaves that node's HAProxy answering and forwarding to the
+new leader, and the endpoint never pauses.
 
 ### Backups, PITR and verification
 

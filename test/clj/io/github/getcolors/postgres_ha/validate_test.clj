@@ -84,6 +84,19 @@
   (is (has? (errors {:cloudflare-record-ttl 30})
             #":cloudflare-record-ttl must be 1 \(automatic\) or between 60 and 86400")))
 
+(deftest the-client-connect-timeout-is-desired-state-not-folklore
+  (testing "the endpoint resolves to every node, so a client can try an address
+            whose machine is powered off — which black-holes rather than
+            refuses, and without a bound libpq waits out the OS TCP retry.
+            Measured on a real failover: one probe in three pays it."
+    (is (has? (errors {:client-connect-timeout-seconds 0})
+              #":client-connect-timeout-seconds must be between 1 and 30"))
+    (is (has? (errors {:client-connect-timeout-seconds 120})
+              #":client-connect-timeout-seconds must be between 1 and 30"))
+    (is (has? (errors {:client-connect-timeout-seconds nil})
+              #":client-connect-timeout-seconds"))
+    (is (= [] (errors {:client-connect-timeout-seconds 5})))))
+
 (deftest ingress-stays-scoped
   (doseq [k [:digitalocean-ssh-sources :digitalocean-client-sources]]
     (is (has? (errors {k ["0.0.0.0/0"]}) #"must not contain 0.0.0.0/0"))

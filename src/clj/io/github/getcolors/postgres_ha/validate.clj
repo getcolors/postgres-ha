@@ -57,7 +57,7 @@
    :patroni-retry-timeout :patroni-synchronous-node-count
    :etcd-version :etcd-sha256 :etcd-client-port :etcd-peer-port
    :haproxy-version :haproxy-primary-port :haproxy-replica-port
-   :haproxy-stats-port
+   :haproxy-stats-port :client-connect-timeout-seconds
    :pgbackrest-package-version :backup-stanza :backup-oncalendar
    :backup-retention-full :restore-check-oncalendar :restore-check-port
    :restore-check-max-age-hours :restore-check-max-lag-seconds
@@ -259,7 +259,8 @@
                      :patroni-loop-wait :patroni-retry-timeout
                      :patroni-synchronous-node-count :backup-retention-full
                      :restore-check-max-age-hours :restore-check-max-lag-seconds
-                     :heartbeat-retention-days :cloudflare-record-ttl]
+                     :heartbeat-retention-days :cloudflare-record-ttl
+                     :client-connect-timeout-seconds]
                     exclusive-port-keys)
           :when (not (positive-int? (get opts k)))]
       (str k " must be a positive integer"))
@@ -269,6 +270,18 @@
     (when-not (or (= 1 (:cloudflare-record-ttl opts))
                   (<= 60 (or (:cloudflare-record-ttl opts) 0) 86400))
       [":cloudflare-record-ttl must be 1 (automatic) or between 60 and 86400"])
+
+    ;; The endpoint resolves to every node, so a client may try an address whose
+    ;; machine is powered off. That address does not refuse the connection, it
+    ;; black-holes the SYN, and libpq's default is to wait out the OS TCP retry
+    ;; — about two minutes — before trying the next one. This is the value the
+    ;; documentation and the acceptance probe both use; it is desired state
+    ;; rather than folklore precisely because getting it wrong turns a
+    ;; survivable node loss into an outage for a third of new connections.
+    (when-not (<= 1 (or (:client-connect-timeout-seconds opts) 0) 30)
+      [(str ":client-connect-timeout-seconds must be between 1 and 30; it "
+            "bounds how long a client waits on a powered-off node's address "
+            "before trying the next one in the endpoint's record set")])
 
     (when-not (< 0 (or (:patroni-synchronous-node-count opts) 0) utils/node-count)
       [(str ":patroni-synchronous-node-count must be between 1 and "

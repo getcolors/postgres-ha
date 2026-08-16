@@ -25,7 +25,14 @@
     # threaded through here, so pg_hba admits exactly this deployment's private
     # network and nothing wider.
     vpc_cidr: "10.114.0.0/20"
+    # Patroni's own vocabulary, taken from its REST API rather than assumed.
+    # A leader reports state `running`; a healthy standby reports `streaming`,
+    # and with synchronous mode on its role is `sync_standby`, not `replica`.
+    # Demanding `running` from all three is a health check that fails on a
+    # perfectly healthy cluster — which costs an entire converge, because every
+    # task after the gate is skipped.
     leader_roles: ["leader", "master", "standby_leader"]
+    healthy_states: ["running", "streaming"]
 
   handlers:
     - name: restart etcd
@@ -53,6 +60,16 @@
         timeout: 600
         sleep: 5
 
+    # A freshly created droplet is still running cloud-init and, behind it,
+    # unattended-upgrades. Both hold the dpkg frontend lock, and the first apt
+    # task to arrive loses a race it does not know it is in. Waiting here is
+    # cheaper than making every package task defensive.
+    - name: Wait for cloud-init to finish before touching the package database
+      ansible.builtin.command:
+        cmd: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+
     - name: Install base packages
       ansible.builtin.apt:
         name:
@@ -65,6 +82,9 @@
         state: present
         update_cache: true
         cache_valid_time: 3600
+        # The apt module can wait for the lock; dpkg_selections below cannot,
+        # which is why that one retries instead.
+        lock_timeout: 300
 
     - name: Install the PGDG repository signing key
       ansible.builtin.get_url:
@@ -95,7 +115,10 @@
           - "pgbackrest=2.59.0-1.pgdg24.04+1"
           - python3-etcd
         state: present
+        lock_timeout: 300
 
+    # `dpkg_selections` has no lock_timeout of its own, so it retries. The lock
+    # is held by unattended-upgrades, which finishes on its own.
     - name: Hold Patroni and pgBackRest at the pinned versions
       ansible.builtin.dpkg_selections:
         name: "{{ item }}"
@@ -103,6 +126,10 @@
       loop:
         - patroni
         - pgbackrest
+      register: held
+      until: held is not failed
+      retries: 30
+      delay: 10
 
     # The Debian package creates and starts a cluster of its own. Patroni owns
     # the data directory, so that cluster has to go before Patroni is allowed
@@ -299,8 +326,10 @@
       register: patroni_cluster
       until: >-
         (patroni_cluster.status | default(0)) == 200
-        and (patroni_cluster.json.members | selectattr('state', 'equalto', 'running') | list | length) == 3
+        and (patroni_cluster.json.members | selectattr('state', 'in', healthy_states) | list | length) == 3
         and (patroni_cluster.json.members | selectattr('role', 'in', leader_roles) | list | length) == 1
+        and (patroni_cluster.json.members | rejectattr('role', 'in', leader_roles)
+             | selectattr('state', 'equalto', 'streaming') | list | length) == 3 - 1
       retries: 90
       delay: 5
 

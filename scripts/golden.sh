@@ -157,12 +157,31 @@ for par in COLORS_PAR_POSTGRES_ADMIN_PASSWORD COLORS_PAR_POSTGRES_REPLICATION_PA
 done
 grep -q 'no_log: true' "$cluster/main.yml"
 
+# The convergence gate has to speak Patroni's vocabulary, not an idea of it: a
+# healthy standby reports state `streaming`, and under synchronous mode one of
+# them reports role `sync_standby`. A gate that demands `running` from all three
+# fails on a perfectly healthy cluster and skips every task after it.
+grep -q 'healthy_states: \["running", "streaming"\]' "$cluster/main.yml"
+grep -q "selectattr('state', 'in', healthy_states)" "$cluster/main.yml"
+if grep -q "selectattr('state', 'equalto', 'running')" "$cluster/main.yml"; then
+  echo 'golden: the convergence gate demands running from every member again' >&2
+  exit 1
+fi
+
 # --- acceptance asserts the four things this package exists to provide -------
 acceptance="$base/postgres-ha-acceptance/acceptance.sh"
 grep -q 'standbys are streaming from the primary' "$acceptance"
 grep -q 'WAL archiving is continuous' "$acceptance"
 grep -q 'the backup repository holds' "$acceptance"
-grep -q 'the verified restore passed' "$acceptance"
+grep -q 'the verified restore passed on' "$acceptance"
+# The endpoint resolves to every node including one that may be powered off,
+# which black-holes the SYN rather than refusing it. Acceptance must bound its
+# own wait, or the check meant to prove the endpoint survived a node loss is
+# the thing that hangs.
+grep -q 'connect_timeout=$CONNECT_TIMEOUT' "$acceptance"
+grep -q 'endpoint probes reached a read-write primary' "$acceptance"
+grep -q 'on_each_node' "$acceptance"
+grep -q 'last_archived_time > last_failed_time' "$acceptance"
 
 # POSIX grep on purpose. rg is not declared in devenv.nix, and a missing binary
 # inside `if` is simply false — the guard would pass silently on a machine
