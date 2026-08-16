@@ -427,3 +427,103 @@ Rather than documenting around it:
 - The measurement is written into `plans/0001`, `SKILL.md`, the configuration
   reference and both READMEs.
 
+## Phase: final verification — 2026-08-16T20:12:00+02:00
+
+Resumed after an API session limit. State was re-derived from the repositories
+and the running cluster rather than from recollection, and one thing had moved
+underneath: the operator had committed my in-flight probe fix as `739a441` and
+the regenerated golden as `f3edbac`, both already pushed. The launcher pin was
+therefore stale against HEAD. Re-pinned at `f3edbac`, pushed, refreshed the
+deployment payload with `npx skills update -p`, and copied the root launcher.
+
+That copy step is worth recording as evidence rather than as a rule: `update -p`
+rewrote `.agents/skills/package-postgres-ha-green/green` to `f3edbac` and left
+the root `./green` on `918cf81`. Without the copy the deployment would have
+kept converging from the previous commit while `skills-lock.json` claimed the
+new one — exactly the trap the workspace documents. Verified with `cmp` after.
+
+The SSH agent had also been lost across the restart; found a live socket under
+`/tmp/ssh-*/agent.*` rather than reaching for the HTTPS token.
+
+### Definition of done, checked one item at a time
+
+| Item | Result |
+|---|---|
+| `bb test` | 50 tests, 196 assertions, 0 failures |
+| `bb golden` | both backend variants byte-identical, all safety assertions pass |
+| `./scripts/launcher.sh` | 10 checks pass |
+| `./green build` from a fresh clone, empty env | ok (`env -i`, cloned from GitHub) |
+| `./green create --dry-run` from a fresh clone, empty env | ok |
+| `./green create` converges for real | exit 0, from the pinned launcher, no `POSTGRES_HA_LIB_ROOT` |
+| replication is streaming | 2 standbys streaming, 1 quorum-synchronous, lag 0 |
+| a snapshot has landed in `postgres-ha-backup` | 2 full backups, confirmed by listing the bucket directly |
+| PITR material archived continuously | 358 segments, unbroken from `...0001` across both timelines |
+| the verified restore passes | passed on all 3 nodes; newest restored heartbeat 40s old |
+| a real failover, endpoint follows | leader powered off; `pg-ha.bigconfig.website` serves the new primary |
+| documentation | usage and recovery in the SKILL, the configuration reference, and both READMEs |
+| both repositories exist and are pushed | `getcolors/postgres-ha`, `getcolors/postgres-ha-digitalocean`, both public |
+
+Final acceptance run, from the pinned launcher, on a cluster that had by then
+been running for six hours and had already survived a failover:
+
+```
+12 checks, 0 failures
+WAL archiving is continuous: 358 segments archived, last attempt succeeded
+the backup repository holds 2 backup(s) and WAL from 000000010000000000000001
+  to 000000020000000100000078
+the archive is unbroken from the cluster's first WAL segment
+the verified restore passed on 3 node(s), most recently 0h ago
+all 9 endpoint probes reached a read-write primary, worst 86ms
+```
+
+The archive spanning `00000001...` to `00000002...` is the failover visible in
+the backup repository: the timeline changed and the WAL stream did not break.
+
+### Everything that failed, in order
+
+| # | Check | Error | Attempts to fix |
+|---|---|---|---|
+| 1 | `./green build` | `template not found on classpath` — `green.scaffold` does not munge hyphens to underscores the way Clojure does for source files | 1 |
+| 2 | `bb test` | my test asserted a valid config was refused; the validator was right | 1 |
+| 3 | `./scripts/launcher.sh` | forbidden-substring guard matched a tool named in the launcher's *usage text* | 1 |
+| 4 | `./green create` (cluster) | dpkg frontend lock held by unattended-upgrades on a fresh droplet | 1 |
+| 5 | `./green create` (cluster) | convergence gate demanded `state == running` from all three; a healthy standby reports `streaming` | 1 |
+| 6 | `./green create` (acceptance) | `last_failed_wal` is sticky and expected on a new cluster; and a per-node fact was asked of the cluster | 1 |
+| 7 | real failover | endpoint hung: a powered-off node black-holes the SYN and libpq's default has no connect timeout | 1 |
+
+Seven failures, each fixed on the first attempt. Five of the seven were **my
+checks being wrong, not the infrastructure** — 2, 3, 5, 6 and, arguably, 7.
+That is the shape of the difficulty here: provisioning three PostgreSQL nodes
+with Patroni is well-trodden, and almost all of the real work was in learning
+what a healthy cluster actually *reports* so that the assertions describe it.
+Failure 5 is the clearest case: the cluster was correct on the very first
+attempt and the gate spent 7.5 minutes failing to notice, then skipped every
+task after it.
+
+### Anything needed and not available
+
+Nothing. Every credential the design calls for already existed. The two places
+where a third credential would have been the obvious move — authenticating
+Patroni's REST API and etcd, and letting the verified restore write a sentinel
+to the primary — were solved without one: a VPC-scoped firewall for the first,
+and a leader-written heartbeat over peer authentication for the second. The
+second is a better design than the one a third credential would have bought.
+
+### External components installed, final
+
+| Component | Version installed | Pinned by |
+|---|---|---|
+| PostgreSQL | 17.11 (Ubuntu 17.11-1.pgdg24.04+2) | major version |
+| Patroni | 4.1.5-1.pgdg24.04+1 | full Debian version, then held |
+| pgBackRest | 2.59.0-1.pgdg24.04+1 | full Debian version, then held |
+| etcd | v3.5.33 | release tag + SHA-256 of the tarball |
+| HAProxy | 2.8 series (Ubuntu noble) | series asserted after install |
+| python3-etcd | Ubuntu noble | Patroni's etcd3 DCS dependency |
+
+### Live infrastructure at the end
+
+Three droplets in `ams3`, all named for this deployment and no others touched:
+`postgres-ha-1` 161.35.145.85, `postgres-ha-2` 64.225.65.170,
+`postgres-ha-3` 159.223.218.57. The leader is `postgres-ha-3` on timeline 2 —
+it did not fail back after the failover, which is correct. `./green delete` was
+not run.
