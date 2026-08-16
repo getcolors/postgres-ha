@@ -1,0 +1,71 @@
+# Golden fixture. Documentation values only — RFC 5737 addresses, an
+# example zone, and a placeholder R2 account. Never point this at anything real.
+profile: postgres-ha-fixture
+workdir: .colors
+
+provider-compute: digitalocean
+provider-dns: cloudflare
+provider-backend: r2
+compute-prevent-destroy: true
+
+cluster-name: postgres-ha-fixture
+cluster-host: pg-ha.fixture.example
+cluster-nodes: 3
+
+postgres-version: 17
+postgres-port: 5432
+postgres-database: appdb
+postgres-admin-user: postgres
+postgres-replication-user: replicator
+
+patroni-package-version: 4.1.5-1.pgdg24.04+1
+patroni-rest-port: 8008
+patroni-ttl: 30
+patroni-loop-wait: 10
+patroni-retry-timeout: 10
+patroni-synchronous-node-count: 1
+
+etcd-version: v3.5.33
+etcd-sha256: 5025b5b24d81a9616b6e284ccd439b9a3df055ef8fdcdc142af3ec8f6a3b3c95
+etcd-client-port: 2379
+etcd-peer-port: 2380
+
+haproxy-version: "2.8"
+haproxy-primary-port: 5432
+haproxy-replica-port: 5433
+haproxy-stats-port: 7000
+
+pgbackrest-package-version: 2.59.0-1.pgdg24.04+1
+backup-stanza: main
+backup-oncalendar: "*-*-* 01:00:00"
+backup-retention-full: 4
+restore-check-oncalendar: "*-*-* 03:00:00"
+restore-check-port: 5442
+restore-check-max-age-hours: 26
+restore-check-max-lag-seconds: 900
+heartbeat-oncalendar: "*:0/1"
+heartbeat-retention-days: 7
+
+backup-r2-bucket: fixture-postgres-ha-backup
+backup-r2-endpoint: https://account.r2.cloudflarestorage.com
+backup-r2-region: auto
+backup-r2-prefix: postgres-ha-fixture
+
+digitalocean-name: postgres-ha-fixture
+digitalocean-region: ams3
+digitalocean-size: s-2vcpu-4gb
+digitalocean-image: ubuntu-24-04-x64
+digitalocean-ssh-keys: "12345678"
+digitalocean-ssh-private-key: ~/.ssh/id_ed25519
+digitalocean-ssh-sources:
+  - 203.0.113.10/32
+digitalocean-client-sources:
+  - 203.0.113.10/32
+digitalocean-vpc-mode: default
+
+cloudflare-zone: fixture.example
+cloudflare-proxied: false
+cloudflare-record-ttl: 60
+
+r2-bucket: fixture-state
+r2-endpoint: https://account.r2.cloudflarestorage.com

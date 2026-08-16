@@ -1,0 +1,14 @@
+[Unit]
+Description=Verified restore of postgres-ha-fixture from Cloudflare R2
+Documentation=https://pgbackrest.org/
+After=patroni.service
+Requires=patroni.service
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+ExecStart=/usr/local/bin/postgres-ha-restore-check
+TimeoutStartSec=4h
+Nice=15
+IOSchedulingClass=idle

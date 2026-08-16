@@ -1,0 +1,31 @@
+# etcd — the distributed configuration store Patroni holds its leader lock in.
+#
+# Colocated on the database nodes rather than given machines of its own: three
+# is the whole machine budget, and a two-member store cannot survive losing a
+# member, which is the only failure this cluster exists to survive.
+#
+# Every URL is a private VPC address. Nothing here listens on the public
+# interface, and the DigitalOcean firewall admits the client and peer ports
+# only from inside the VPC — that boundary is what stands in for the etcd
+# authentication this deployment has no credential to configure.
+name: {{ inventory_hostname }}
+data-dir: /var/lib/etcd
+
+listen-peer-urls: http://{{ private_ip }}:2380
+listen-client-urls: http://{{ private_ip }}:2379,http://127.0.0.1:2379
+initial-advertise-peer-urls: http://{{ private_ip }}:2380
+advertise-client-urls: http://{{ private_ip }}:2379
+
+initial-cluster: {% for host in groups['postgres'] | sort %}{{ host }}=http://{{ hostvars[host].private_ip }}:2380{% if not loop.last %},{% endif %}{% endfor %}
+
+initial-cluster-token: postgres-ha-fixture-etcd
+# Only consulted while the data directory is empty; a member that has already
+# joined ignores this and reads its membership from disk, so re-running the
+# converge does not attempt to re-bootstrap the store.
+initial-cluster-state: new
+
+auto-compaction-mode: periodic
+auto-compaction-retention: "1h"
+quota-backend-bytes: 2147483648
+snapshot-count: 10000
+enable-v2: false

@@ -1,0 +1,23 @@
+[Unit]
+Description=etcd for the <{ cluster-name }> PostgreSQL cluster
+Documentation=https://etcd.io/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=etcd
+Group=etcd
+ExecStart=/usr/local/bin/etcd --config-file=/etc/etcd/etcd.conf.yml
+Restart=always
+RestartSec=5s
+LimitNOFILE=65536
+# Patroni's leader lock lives here. A member that is killed and comes back with
+# a corrupt store is worse than one that stays down, so the store is never
+# started from a partially written data directory.
+StateDirectory=etcd
+ProtectSystem=full
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

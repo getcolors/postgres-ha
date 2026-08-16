@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily pgBackRest full backup of postgres-ha-fixture
+
+[Timer]
+OnCalendar=*-*-* 01:00:00
+# All three nodes fire at the same wall-clock time and two of them exit
+# immediately, so the spread only has to be enough to avoid three simultaneous
+# Patroni REST calls, not enough to serialise three backups.
+RandomizedDelaySec=120
+Persistent=true
+Unit=postgres-ha-backup.service
+
+[Install]
+WantedBy=timers.target

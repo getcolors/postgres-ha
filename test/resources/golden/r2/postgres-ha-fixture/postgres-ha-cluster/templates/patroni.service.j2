@@ -1,0 +1,25 @@
+[Unit]
+Description=Patroni — PostgreSQL failover orchestration for postgres-ha-fixture
+Documentation=https://patroni.readthedocs.io/
+After=network-online.target etcd.service
+Wants=network-online.target
+Requires=etcd.service
+
+[Service]
+Type=simple
+User=postgres
+Group=postgres
+Environment=PATRONI_CONFIG=/etc/patroni/patroni.yml
+ExecStart=/usr/bin/patroni /etc/patroni/patroni.yml
+# A reload, not a restart: SIGHUP makes Patroni re-read its configuration
+# without dropping the leader lock, so a configuration change is not a
+# failover.
+ExecReload=/bin/kill -s HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=120
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

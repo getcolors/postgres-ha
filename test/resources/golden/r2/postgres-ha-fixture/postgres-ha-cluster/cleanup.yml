@@ -1,0 +1,63 @@
+---
+# Teardown. Run before the infrastructure stage destroys the droplets, so the
+# cluster is stopped rather than cut off mid-write, and so the etcd data
+# directory is gone if the droplets are kept and re-converged.
+#
+# `ignore_unreachable` because delete is also the path taken when a node has
+# already failed: refusing to tear down the other two because one is gone would
+# leave the deployment in a state nothing can act on.
+- name: Tear down the postgres-ha-fixture cluster software
+  hosts: postgres
+  gather_facts: false
+  any_errors_fatal: false
+  ignore_unreachable: true
+  tasks:
+    - name: Stop the scheduled work
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop:
+        - postgres-ha-heartbeat.timer
+        - postgres-ha-backup.timer
+        - postgres-ha-restore-check.timer
+      failed_when: false
+
+    - name: Stop the client endpoint before the database
+      ansible.builtin.systemd_service:
+        name: haproxy
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    # Patroni before etcd: a Patroni that loses its store first spends its
+    # shutdown trying to reach one, and can demote or restart PostgreSQL on the
+    # way out.
+    - name: Stop Patroni
+      ansible.builtin.systemd_service:
+        name: patroni
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Stop etcd
+      ansible.builtin.systemd_service:
+        name: etcd
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Remove the etcd data directory
+      ansible.builtin.file:
+        path: /var/lib/etcd
+        state: absent
+      failed_when: false
+
+    - name: Remove any scratch restore left behind
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/postgresql/restore-check
+        - /var/lib/postgresql/restore-check.sock
+      failed_when: false

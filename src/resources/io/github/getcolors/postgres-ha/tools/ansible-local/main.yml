@@ -1,0 +1,30 @@
+---
+# The only stage that touches this machine. It writes one ~/.ssh/config block
+# per node so `green status`, `green failover` and the acceptance checks all
+# reach the cluster through a single, reviewable definition of the identity
+# file and host-key policy, instead of each growing its own ssh flags.
+#
+# `block_state` is passed as an extra var: create writes the blocks, delete
+# removes them, and the same playbook file serves both events.
+- name: Manage local access to the <{ cluster-name }> cluster
+  hosts: local
+  gather_facts: false
+  tasks:
+    - name: Manage the SSH alias for each node
+      ansible.builtin.blockinfile:
+        path: ~/.ssh/config
+        marker: "# {mark} postgres-ha {{ item.alias }} ANSIBLE MANAGED BLOCK"
+        state: "{{ block_state | default('present') }}"
+        create: true
+        mode: "0600"
+        block: |
+          Host {{ item.alias }}
+              HostName {{ item['public-ip'] }}
+              User root
+              Port 22
+              IdentityFile {{ ssh_private_key }}
+              StrictHostKeyChecking accept-new
+              ForwardAgent no
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item.alias }}"

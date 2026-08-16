@@ -1,0 +1,132 @@
+(ns io.github.getcolors.postgres-ha.validate-test
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
+            [green.cli :as green-cli]
+            [io.github.getcolors.postgres-ha.validate :as validate]))
+
+(def fixture
+  (let [file (io/file "test/fixtures/colors.yml")]
+    (green-cli/read-state file (slurp file))))
+
+(defn- errors [overrides]
+  (validate/state-errors (merge fixture overrides)))
+
+(defn- has? [messages re]
+  (boolean (some #(re-find re %) messages)))
+
+(deftest the-fixture-is-renderable
+  (is (= [] (validate/state-errors fixture))
+      "the golden fixture must stay valid, or the golden proves nothing"))
+
+(deftest every-problem-is-reported-at-once
+  (testing "a person fixing desired state one error per run gives up on it"
+    (let [messages (errors {:cluster-host nil :postgres-database "Not An Ident"
+                            :backup-retention-full 0 :etcd-sha256 "nope"})]
+      (is (<= 4 (count messages)))
+      (is (has? messages #":cluster-host is required"))
+      (is (has? messages #"postgres-database must be an unquoted lowercase SQL identifier"))
+      (is (has? messages #"backup-retention-full must be a positive integer"))
+      (is (has? messages #"etcd-sha256 must be the lowercase hex SHA-256")))))
+
+(deftest the-profile-overlay-is-refused
+  (let [par (green-cli/par-name :profile)]
+    (is (nil? (validate/env-errors {})))
+    (is (nil? (validate/env-errors {par ""})))
+    (is (has? (validate/env-errors {par "somebody-elses-deployment"})
+              #"takes profile from colors.yml only"))))
+
+(deftest the-vpc-is-discovered-and-cannot-be-described
+  (testing "accepting a VPC identifier would let one deployment be edited onto
+            another's private network while passing every other check"
+    (doseq [k validate/forbidden-vpc-keys]
+      (is (has? (errors {k "10.0.0.0/16"})
+                #"must not be configured; the regional default VPC is discovered")
+          (str k " must be refused"))))
+  (is (has? (errors {:digitalocean-vpc-mode "explicit"})
+            #":digitalocean-vpc-mode must be default")))
+
+(deftest the-node-budget-is-fixed
+  (is (has? (errors {:cluster-nodes 2}) #":cluster-nodes must be 3"))
+  (is (has? (errors {:cluster-nodes 5}) #":cluster-nodes must be 3")))
+
+(deftest ports-that-share-an-address-must-differ
+  (testing "the primary listener deliberately reuses the PostgreSQL port,
+            because HAProxy binds the public address and PostgreSQL the private one"
+    (is (= [] (errors {:haproxy-primary-port 5432 :postgres-port 5432}))))
+  (is (has? (errors {:haproxy-replica-port 5432})
+            #":haproxy-replica-port must differ from :postgres-port"))
+  (is (has? (errors {:etcd-client-port 8008})
+            #"port 8008 is claimed by"))
+  (is (has? (errors {:restore-check-port 7000})
+            #"port 7000 is claimed by")))
+
+(deftest quorum-settings-cannot-describe-a-cluster-that-stalls
+  (testing "requiring every standby to acknowledge leaves a three-node cluster
+            that cannot tolerate losing one, which is the whole point of it"
+    (is (has? (errors {:patroni-synchronous-node-count 3})
+              #":patroni-synchronous-node-count must be between 1 and 2")))
+  (is (has? (errors {:patroni-synchronous-node-count 0})
+            #":patroni-synchronous-node-count"))
+  (testing "two is defensible — a stricter durability bar the cluster can still
+            degrade from — so it is allowed rather than legislated against"
+    (is (= [] (errors {:patroni-synchronous-node-count 2}))))
+  (testing "a TTL that can expire between two health checks is a cluster that
+            fails over because nothing went wrong"
+    (is (has? (errors {:patroni-ttl 15 :patroni-loop-wait 10})
+              #":patroni-ttl must exceed twice :patroni-loop-wait"))))
+
+(deftest the-endpoint-must-be-reachable-as-postgresql
+  (is (has? (errors {:cloudflare-proxied true})
+            #"Cloudflare's proxy does not carry the PostgreSQL wire protocol"))
+  (is (has? (errors {:cluster-host "pg-ha.somewhere.else"})
+            #":cluster-host must be inside :cloudflare-zone"))
+  (is (has? (errors {:cloudflare-record-ttl 30})
+            #":cloudflare-record-ttl must be 1 \(automatic\) or between 60 and 86400")))
+
+(deftest ingress-stays-scoped
+  (doseq [k [:digitalocean-ssh-sources :digitalocean-client-sources]]
+    (is (has? (errors {k ["0.0.0.0/0"]}) #"must not contain 0.0.0.0/0"))
+    (is (has? (errors {k []}) #"must be a non-empty list of IPv4 CIDRs"))
+    (is (has? (errors {k ["203.0.113.10"]}) #"must be a non-empty list of IPv4 CIDRs"))))
+
+(deftest blast-radius-is-separated
+  (is (has? (errors {:backup-r2-bucket (:r2-bucket fixture)})
+            #"must not be the OpenTofu state bucket")))
+
+(deftest versions-are-pinned-precisely-enough-to-reproduce
+  (is (has? (errors {:patroni-package-version "4.1.5"})
+            #"must be a full Debian package version"))
+  (is (has? (errors {:pgbackrest-package-version "latest"})
+            #"must be a full Debian package version"))
+  (is (has? (errors {:etcd-version "3.5.33"}) #":etcd-version must be an exact vX.Y.Z"))
+  (is (has? (errors {:haproxy-version "2.8.5"}) #":haproxy-version must be a distribution major.minor")))
+
+(deftest the-restore-check-tolerance-cannot-be-set-below-what-archiving-allows
+  (is (has? (errors {:restore-check-max-lag-seconds 30})
+            #":restore-check-max-lag-seconds must exceed 120")))
+
+(deftest credentials-are-demanded-by-name
+  (testing "with none set, every one is named once"
+    (let [messages (vec (validate/secret-errors fixture))]
+      (is (= (count messages) (count (distinct messages))))
+      (doseq [par ["COLORS_PAR_DO_TOKEN" "COLORS_PAR_CLOUDFLARE_API_TOKEN"
+                   "COLORS_PAR_R2_ACCESS_KEY_ID" "COLORS_PAR_R2_SECRET_ACCESS_KEY"
+                   "COLORS_PAR_BACKUP_R2_ACCESS_KEY_ID"
+                   "COLORS_PAR_BACKUP_R2_SECRET_ACCESS_KEY"
+                   "COLORS_PAR_POSTGRES_ADMIN_PASSWORD"
+                   "COLORS_PAR_POSTGRES_REPLICATION_PASSWORD"]]
+        (is (has? messages (re-pattern par)) (str par " must be demanded")))))
+  (testing "and a supplied one stops being demanded"
+    (is (not (has? (validate/secret-errors (assoc fixture :do-token "t"))
+                   #"COLORS_PAR_DO_TOKEN\b")))))
+
+(deftest no-message-can-contain-a-credential
+  (let [loaded (merge fixture {:do-token "tok-do" :cloudflare-api-token "tok-cf"
+                               :postgres-admin-password "hunter2"
+                               :backup-r2-secret-access-key "sekrit"})
+        messages (concat (validate/state-errors loaded)
+                         (validate/secret-errors loaded))]
+    (doseq [secret ["tok-do" "tok-cf" "hunter2" "sekrit"]]
+      (is (not (some #(str/includes? % secret) messages))
+          (str "a validation message rendered " secret)))))

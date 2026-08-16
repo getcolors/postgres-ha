@@ -1,0 +1,13 @@
+[Unit]
+Description=Archive-continuity heartbeat for <{ cluster-name }>
+
+[Timer]
+OnCalendar=<{ heartbeat-oncalendar }>
+# No Persistent=true: a heartbeat that was missed while the node was down is
+# not worth writing late, and writing a burst of them on boot would make the
+# restore check's freshness assertion meaningless.
+AccuracySec=5s
+Unit=postgres-ha-heartbeat.service
+
+[Install]
+WantedBy=timers.target

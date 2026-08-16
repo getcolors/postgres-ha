@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# postgres-ha-heartbeat — one row a minute, written only by the leader.
+#
+# This exists so that "WAL is being archived continuously" is a claim something
+# can check rather than a claim about a configuration file. Every minute the
+# leader writes a timestamped row; `archive_timeout` guarantees the segment
+# carrying it reaches the repository within a bounded time; and
+# postgres-ha-restore-check later asserts that a *restored* copy contains a
+# heartbeat only minutes old. A break anywhere in the archive path shows up as
+# a restored copy whose newest heartbeat has stopped advancing.
+#
+# It authenticates by peer over the Unix socket as the postgres system user, so
+# it needs no password and no credential file. That is only possible because it
+# runs on the node that is the primary — which is also the only node where the
+# insert would succeed.
+set -euo pipefail
+
+PATRONI_URL="http://{{ private_ip }}:8008"
+DB="appdb"
+RETENTION_DAYS=7
+
+export PGHOST=/var/run/postgresql
+export PGPORT=5432
+
+if [ "$(id -un)" != postgres ]; then
+  exec sudo -n -u postgres -- "$0" "$@"
+fi
+
+# Patroni answers 200 on /primary only where the leader lock is held. Asking it
+# is cheaper and more truthful than asking PostgreSQL, which would happily
+# report a primary that has already lost the lock and is about to be demoted.
+if ! curl -fsS -o /dev/null --max-time 5 "$PATRONI_URL/primary"; then
+  exit 0
+fi
+
+psql -X -q -v ON_ERROR_STOP=1 -d "$DB" <<SQL
+INSERT INTO colors_restore_sentinel (token, node)
+VALUES (gen_random_uuid()::text, '{{ inventory_hostname }}');
+DELETE FROM colors_restore_sentinel
+WHERE written < now() - interval '${RETENTION_DAYS} days';
+SQL
