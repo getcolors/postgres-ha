@@ -29,7 +29,7 @@ fi
 # Patroni answers 200 on /primary only where the leader lock is held. Asking it
 # is cheaper and more truthful than asking PostgreSQL, which would happily
 # report a primary that has already lost the lock and is about to be demoted.
-if ! curl -fsS -o /dev/null --max-time 5 "$PATRONI_URL/primary"; then
+if ! curl -fs -o /dev/null --max-time 5 "$PATRONI_URL/primary"; then
   exit 0
 fi
 

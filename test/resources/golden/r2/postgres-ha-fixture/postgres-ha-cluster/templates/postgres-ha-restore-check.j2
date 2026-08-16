@@ -34,7 +34,7 @@ if [ "$(id -un)" != postgres ]; then
   exec sudo -n -u postgres -- "$0" "$@"
 fi
 
-if ! curl -fsS -o /dev/null --max-time 5 "$PATRONI_URL/replica"; then
+if ! curl -fs -o /dev/null --max-time 5 "$PATRONI_URL/replica"; then
   echo "postgres-ha-restore-check: {{ inventory_hostname }} is not a streaming standby; nothing to do"
   exit 0
 fi
