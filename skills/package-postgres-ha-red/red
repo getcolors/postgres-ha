@@ -36,7 +36,7 @@ import { homedir } from "node:os";
 // directory, which would halt Bun's upward resolution of
 // `package-postgres-ha-red` and break the development symlink at red/red.
 const PINS = {
-  "package-postgres-ha-red": null,
+  "package-postgres-ha-red": "github:getcolors/postgres-ha#2d73cf76e9d420443ea400d0025c8313919fcdbe",
   "red": "github:getcolors/red#db9bfe61282e2093f4098bf5a6ee0cd10added6e",
 };
 
