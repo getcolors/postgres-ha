@@ -1,0 +1,24 @@
+[project]
+name = "package-postgres-ha-blue"
+version = "0.1.0"
+description = "Blue/Python implementation of the postgres-ha package"
+requires-python = ">=3.11"
+dependencies = [
+    "blue",
+]
+
+[tool.uv.sources]
+blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+[tool.hatch.metadata]
+allow-direct-references = true
+[tool.hatch.build.targets.wheel]
+packages = ["src/package_postgres_ha_blue"]
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

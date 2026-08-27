@@ -10,10 +10,12 @@
   packages = with pkgs; [
     awscli2
     babashka
+    bun
     curl
     doctl
     jq
     openssh
     postgresql_17
+    uv
   ];
 }

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily verified restore of <{ cluster-name }>
+
+[Timer]
+OnCalendar=<{ restore-check-oncalendar }>
+RandomizedDelaySec=600
+Persistent=true
+Unit=postgres-ha-restore-check.service
+
+[Install]
+WantedBy=timers.target

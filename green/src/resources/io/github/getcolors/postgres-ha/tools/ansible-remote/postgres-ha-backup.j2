@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# postgres-ha-backup — the daily full backup to Cloudflare R2.
+#
+# Runs on every node and does nothing on two of them. Gating on Patroni's
+# `/primary` rather than on a node name is what keeps the schedule correct
+# after a failover: the timer does not have to be moved, because the answer to
+# "am I the leader" moved instead.
+set -euo pipefail
+
+PATRONI_URL="http://{{ private_ip }}:<{ patroni-rest-port }>"
+STANZA="<{ backup-stanza }>"
+
+if [ "$(id -un)" != postgres ]; then
+  exec sudo -n -u postgres -- "$0" "$@"
+fi
+
+if ! curl -fs -o /dev/null --max-time 5 "$PATRONI_URL/primary"; then
+  echo "postgres-ha-backup: {{ inventory_hostname }} does not hold the leader lock; nothing to do"
+  exit 0
+fi
+
+# `check` before `backup`: it forces a WAL switch and confirms the segment
+# reaches the repository. A backup taken while archiving is broken is not a
+# backup, it is a file that will fail to restore at the worst possible moment.
+pgbackrest --stanza="$STANZA" check
+
+pgbackrest --stanza="$STANZA" --type=full backup
+
+# Retention is configured in pgbackrest.conf and applied by `expire`, which
+# `backup` runs itself. Running it again is harmless and makes the intent
+# visible in the journal.
+pgbackrest --stanza="$STANZA" expire
+
+pgbackrest --stanza="$STANZA" --output=json info \
+  | jq -r '.[] | "postgres-ha-backup: stanza \(.name) now holds \(.backup | length) backup(s), archive \(.archive[0].min // "none")..\(.archive[0].max // "none")"'

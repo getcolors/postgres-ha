@@ -1,0 +1,135 @@
+# Patroni — the failover orchestrator.
+#
+# Patroni owns postgresql.conf, pg_hba.conf, the replication slots and the
+# promotion decision. Nothing else on the node writes those files; editing them
+# by hand is undone at the next reload, which is the point.
+#
+# Rendered with `no_log`, mode 0600, owned by postgres: it interpolates the two
+# database passwords out of the environment at play time and they are not
+# written anywhere in the generated tree.
+scope: <{ cluster-name }>
+name: {{ inventory_hostname }}
+namespace: /colors/
+
+restapi:
+  # Bound to the private VPC address only. The REST API accepts unauthenticated
+  # POSTs for switchover and restart, and this deployment has no credential to
+  # protect it with, so it is never placed on the public interface and the
+  # DigitalOcean firewall admits it only from inside the VPC.
+  listen: {{ private_ip }}:<{ patroni-rest-port }>
+  connect_address: {{ private_ip }}:<{ patroni-rest-port }>
+
+etcd3:
+  hosts:
+{% for host in groups['postgres'] | sort %}
+    - {{ hostvars[host].private_ip }}:<{ etcd-client-port }>
+{% endfor %}
+
+bootstrap:
+  # `dcs` is written to the distributed store the first time any node
+  # bootstraps, and from then on it is cluster-wide state rather than file
+  # state. A promoted standby therefore inherits the same archiving and
+  # replication settings without being reconfigured.
+  dcs:
+    ttl: <{ patroni-ttl }>
+    loop_wait: <{ patroni-loop-wait }>
+    retry_timeout: <{ patroni-retry-timeout }>
+    maximum_lag_on_failover: 1048576
+    # Quorum synchronous commit. With three nodes and a required
+    # acknowledgement count of <{ patroni-synchronous-node-count }>, a commit
+    # is durable on at least two machines before the client is told it
+    # succeeded, and the cluster still accepts writes after losing one.
+    synchronous_mode: true
+    synchronous_node_count: <{ patroni-synchronous-node-count }>
+    # Deliberately not strict: with `synchronous_mode_strict` a cluster that
+    # has lost both standbys refuses writes outright. Losing two of three
+    # machines is beyond this topology's stated tolerance, and stalling is a
+    # worse answer there than degrading to asynchronous durability and saying
+    # so in `patronictl list`.
+    synchronous_mode_strict: false
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        max_connections: 200
+        max_wal_senders: 10
+        max_replication_slots: 10
+        # pg_rewind needs these to reattach a demoted primary that diverged,
+        # instead of re-cloning the whole data directory over the network.
+        wal_log_hints: "on"
+        wal_keep_size: 1024MB
+        # Continuous WAL archiving is the PITR material. It is set here, in the
+        # distributed store, so that whichever node holds the leader lock is
+        # archiving — including one promoted seconds ago.
+        archive_mode: "on"
+        archive_command: "pgbackrest --stanza=<{ backup-stanza }> archive-push %p"
+        # Bounds the recovery window on an idle cluster: without it a database
+        # nobody is writing to would archive nothing, and the most recent
+        # restorable point would drift backwards.
+        archive_timeout: 60s
+        restore_command: "pgbackrest --stanza=<{ backup-stanza }> archive-get %f %p"
+        password_encryption: scram-sha-256
+        unix_socket_directories: /var/run/postgresql
+        shared_buffers: 1GB
+        effective_cache_size: 2GB
+        maintenance_work_mem: 256MB
+        checkpoint_completion_target: 0.9
+        random_page_cost: 1.1
+        log_min_duration_statement: 1000
+        log_checkpoints: "on"
+        log_connections: "off"
+  initdb:
+    - encoding: UTF8
+    - locale: C.UTF-8
+    # Data checksums cannot be turned on later without rewriting the cluster,
+    # and a restore that silently returns corrupt pages is the one failure a
+    # verified-restore check cannot catch.
+    - data-checksums
+
+postgresql:
+  listen: {{ private_ip }}:<{ postgres-port }>
+  connect_address: {{ private_ip }}:<{ postgres-port }>
+  data_dir: <{ postgres-data-dir }>
+  bin_dir: <{ postgres-bin-dir }>
+  pgpass: /var/lib/postgresql/.pgpass_patroni
+  authentication:
+    replication:
+      username: <{ postgres-replication-user }>
+      password: "<{ replication-password-lookup|safe }>"
+    superuser:
+      username: <{ postgres-admin-user }>
+      password: "<{ admin-password-lookup|safe }>"
+    rewind:
+      username: <{ postgres-admin-user }>
+      password: "<{ admin-password-lookup|safe }>"
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+  # pg_hba is managed here rather than only at bootstrap, so a rule change
+  # reaches every node on the next reload instead of only the one that happened
+  # to initialise the cluster.
+  #
+  # `local ... peer` is what lets the converge and the two scripts talk to the
+  # database as the postgres system user with no password at all. Everything
+  # over TCP is scram-sha-256 and restricted to the VPC: clients arrive through
+  # HAProxy, so their source address is a node's private address, never a
+  # public one.
+  pg_hba:
+    - local all all peer
+    - local replication all peer
+    - host all all 127.0.0.1/32 scram-sha-256
+    - host all all {{ vpc_cidr }} scram-sha-256
+    - host replication <{ postgres-replication-user }> {{ vpc_cidr }} scram-sha-256
+  create_replica_methods:
+    - basebackup
+  basebackup:
+    max-rate: 100M
+
+# Never set. `nofailover` on every node would leave a cluster that cannot
+# promote, which passes every check until the day it matters.
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

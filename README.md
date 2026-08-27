@@ -1,8 +1,9 @@
 # postgres-ha
 
-A Green Package Skill that provisions a three-node PostgreSQL failover cluster
-on DigitalOcean, with point-in-time recovery to Cloudflare R2 and a restore
-that is verified on a schedule rather than assumed.
+A tri-colour Package Skill (green, red, blue) that provisions a three-node
+PostgreSQL failover cluster on DigitalOcean, with point-in-time recovery to
+Cloudflare R2 and a restore that is verified on a schedule rather than
+assumed.
 
 ```sh
 npx skills add getcolors/postgres-ha
@@ -11,6 +12,10 @@ cp .agents/skills/package-postgres-ha-green/green ./green
 ./green create --dry-run
 ./green create
 ```
+
+The same package ships as `package-postgres-ha-red` (TypeScript/Bun) and
+`package-postgres-ha-blue` (Python/uv); the three launchers accept the same
+verbs against the same `colors.yml` and render byte-identical trees.
 
 ## What it builds
 
@@ -76,8 +81,10 @@ no operator action; a lost primary is promoted automatically within roughly
 ## Development
 
 ```sh
-bb test
-bb golden
+cd green && bb test && bb golden      # canonical Clojure implementation
+cd red && bun test && bun run typecheck
+cd blue && uv run pytest
+./scripts/parity.sh                   # three colours, two backends, byte for byte
 ./scripts/launcher.sh
 ```
 

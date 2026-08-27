@@ -53,24 +53,26 @@
 ;; cannot resolve its own library says so rather than inventing a SHA or
 ;; silently falling back to whatever is lying around. `bb pin` refuses to stamp
 ;; a dirty or unpushed HEAD for the same reason.
-(def ^:private postgres-ha-sha "f3edbac2e56b5115c47d662af32e08ef0fda92fe")
+(def ^:private postgres-ha-sha nil)
 
 (def ^:private postgres-ha-git-url "https://github.com/getcolors/postgres-ha.git")
 (def ^:private green-git-url "https://github.com/getcolors/green.git")
 
 (defn- lib-coord
-  [env-var url sha]
+  [env-var url sha deps-root]
   (if-let [root (System/getenv env-var)]
-    {:local/root root}
-    (when sha {:git/url url :git/sha sha})))
+    {:local/root (if deps-root (str (io/file root deps-root)) root)}
+    (when sha
+      (cond-> {:git/url url :git/sha sha}
+        deps-root (assoc :deps/root deps-root)))))
 
 (def ^:private resolved?
   (some? (io/resource "io/github/getcolors/postgres_ha/tools.clj")))
 
 (def ^:private bootstrap-error
   (when (and (System/getProperty "babashka.version") (not resolved?))
-    (let [package (lib-coord "POSTGRES_HA_LIB_ROOT" postgres-ha-git-url postgres-ha-sha)
-          green (lib-coord "GREEN_LIB_ROOT" green-git-url nil)]
+    (let [package (lib-coord "POSTGRES_HA_LIB_ROOT" postgres-ha-git-url postgres-ha-sha "green")
+          green (lib-coord "GREEN_LIB_ROOT" green-git-url nil nil)]
       (if-not package
         (str "this launcher carries no postgres-ha pin.\n"
              "It has not been stamped by `bb pin`, which cannot run until the "

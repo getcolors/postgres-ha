@@ -1,0 +1,41 @@
+# pgBackRest — daily full backups and continuous WAL archiving to Cloudflare R2.
+#
+# R2 is S3-compatible, so this is the `s3` repository type pointed at an
+# explicit endpoint with path-style URIs. The two keys are read from the
+# environment at play time; this file is rendered with `no_log`, owned by
+# postgres and mode 0600, and is the only place on the node they exist.
+#
+# The repository is a separate bucket from the OpenTofu state bucket, with its
+# own credential pair: a leaked backup key must not be able to rewrite the
+# infrastructure state that describes where the cluster is.
+[global]
+repo1-type=s3
+repo1-s3-bucket=<{ backup-r2-bucket }>
+repo1-s3-endpoint=<{ backup-r2-s3-endpoint }>
+repo1-s3-region=<{ backup-r2-region }>
+repo1-s3-uri-style=path
+repo1-s3-key={{ lookup('env', 'COLORS_PAR_BACKUP_R2_ACCESS_KEY_ID') }}
+repo1-s3-key-secret={{ lookup('env', 'COLORS_PAR_BACKUP_R2_SECRET_ACCESS_KEY') }}
+repo1-path=<{ backup-repo-path }>
+
+# Keep <{ backup-retention-full }> full backups. WAL older than the oldest
+# retained full backup is expired with it, which is what bounds the recovery
+# window and the bill at the same time.
+repo1-retention-full=<{ backup-retention-full }>
+repo1-retention-full-type=count
+
+# zstd over the default gzip: the WAL stream is the thing being compressed
+# thousands of times a day, and archive-push is on the critical path of every
+# commit that fills a segment.
+compress-type=zst
+compress-level=3
+process-max=2
+start-fast=y
+log-level-console=info
+log-level-file=detail
+log-path=/var/log/pgbackrest
+
+[<{ backup-stanza }>]
+pg1-path=<{ postgres-data-dir }>
+pg1-port=<{ postgres-port }>
+pg1-socket-path=/var/run/postgresql

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# What the copied payload does in the environments it actually lands in.
+# What the copied payloads do in the environments they actually land in.
 #
-# The launcher is the one file in this repository the unit suite cannot reach:
-# in a project it is a standalone babashka script with no classpath but the one
-# it builds for itself. Everything asserted here is about that.
+# The launchers are the files in this repository the unit suites cannot reach:
+# in a project each is a standalone script with no library but the one it
+# resolves for itself. Everything asserted here is about that. Green carries
+# the full battery; red and blue get the same standalone smokes — an unpinned
+# copy refuses loudly, a LIB_ROOT copy builds — because their resolution logic
+# is what a deployment actually runs.
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 launcher="$root/skills/package-postgres-ha-green/green"
@@ -83,8 +86,55 @@ out=$(cd "$tmp/project" && env -i PATH="$PATH" HOME="$HOME" \
   || fail "build needs credentials it should not: $out"
 ok 'builds with an empty environment'
 
-[ -L "$root/green" ] && [ "$(readlink "$root/green")" = skills/package-postgres-ha-green/green ] \
-  || fail 'the repository root green is not the payload symlink'
-ok 'the repository entry point is the payload itself'
+for colour in green red blue; do
+  [ -L "$root/$colour/$colour" ] \
+    && [ "$(readlink "$root/$colour/$colour")" = "../skills/package-postgres-ha-$colour/$colour" ] \
+    || fail "the $colour colour entry point is not the payload symlink"
+done
+ok 'every colour entry point is the payload itself'
+
+# --- red ---------------------------------------------------------------------
+red_launcher="$root/skills/package-postgres-ha-red/red"
+[ -f "$red_launcher" ] || fail 'the red payload launcher is missing'
+mkdir "$tmp/red-bare"
+cp "$red_launcher" "$tmp/red-bare/red"; chmod +x "$tmp/red-bare/red"
+if grep -q '"package-postgres-ha-red": null,' "$red_launcher"; then
+  out=$(cd "$tmp/red-bare" && ./red build 2>&1 || true)
+  grep -q POSTGRES_HA_LIB_ROOT <<<"$out" \
+    || fail 'an unstamped red payload did not explain the working-tree override'
+  ok 'unstamped red payload fails with an actionable working-tree override'
+else
+  ok 'red payload carries a real pushed package commit'
+fi
+mkdir "$tmp/red-project"
+cp "$red_launcher" "$tmp/red-project/red"; chmod +x "$tmp/red-project/red"
+cp "$root/test/fixtures/colors.yml" "$tmp/red-project/colors.yml"
+(cd "$tmp/red-project" && POSTGRES_HA_LIB_ROOT="$root" ./red build >/dev/null) \
+  || fail 'the red working-tree override did not build'
+[ -f "$tmp/red-project/.colors/postgres-ha-fixture/postgres-ha-infrastructure/main.tf" ] \
+  || fail 'a copied red payload rendered nothing'
+ok 'red working-tree override renders a complete tree from a copied payload'
+
+# --- blue --------------------------------------------------------------------
+blue_launcher="$root/skills/package-postgres-ha-blue/blue"
+[ -f "$blue_launcher" ] || fail 'the blue payload launcher is missing'
+mkdir "$tmp/blue-bare"
+cp "$blue_launcher" "$tmp/blue-bare/blue"; chmod +x "$tmp/blue-bare/blue"
+if grep -q '^# dependencies = \[\]$' "$blue_launcher"; then
+  out=$(cd "$tmp/blue-bare" && ./blue build 2>&1 || true)
+  grep -q POSTGRES_HA_LIB_ROOT <<<"$out" \
+    || fail 'an unstamped blue payload did not explain the working-tree override'
+  ok 'unstamped blue payload fails with an actionable working-tree override'
+else
+  ok 'blue payload carries a real pushed package commit'
+fi
+mkdir "$tmp/blue-project"
+cp "$blue_launcher" "$tmp/blue-project/blue"; chmod +x "$tmp/blue-project/blue"
+cp "$root/test/fixtures/colors.yml" "$tmp/blue-project/colors.yml"
+(cd "$tmp/blue-project" && POSTGRES_HA_LIB_ROOT="$root" ./blue build >/dev/null) \
+  || fail 'the blue working-tree override did not build'
+[ -f "$tmp/blue-project/.colors/postgres-ha-fixture/postgres-ha-infrastructure/main.tf" ] \
+  || fail 'a copied blue payload rendered nothing'
+ok 'blue working-tree override renders a complete tree from a copied payload'
 
 echo "launcher: $checks checks passed"

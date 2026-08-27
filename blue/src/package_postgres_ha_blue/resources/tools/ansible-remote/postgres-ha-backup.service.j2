@@ -1,0 +1,17 @@
+[Unit]
+Description=pgBackRest full backup of <{ cluster-name }> to Cloudflare R2
+Documentation=https://pgbackrest.org/
+After=patroni.service
+Requires=patroni.service
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+ExecStart=/usr/local/bin/postgres-ha-backup
+# The script exits 0 and does nothing on a node that is not the leader, so the
+# unit is installed identically everywhere and the schedule follows the leader
+# lock rather than a node name.
+TimeoutStartSec=6h
+Nice=10
+IOSchedulingClass=idle

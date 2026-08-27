@@ -16,8 +16,8 @@
                                  'io.github.getcolors.postgres-ha.workflow-test)]
                 (System/exit (if (pos? (+ fail error)) 1 0)))}
   golden {:doc "Diff the rendered tree against the committed golden"
-          :task (shell "./scripts/golden.sh")}
+          :task (shell "../scripts/golden.sh")}
   golden:accept {:doc "Regenerate the golden after inspecting the diff"
-                 :task (shell "./scripts/golden.sh" "--accept")}
-  pin {:doc "Stamp the bundled launcher after a clean pushed commit"
+                 :task (shell "../scripts/golden.sh" "--accept")}
+  pin {:doc "Stamp the three bundled launchers after a clean pushed commit"
        :task (load-file "tasks/pin.clj")}}}
