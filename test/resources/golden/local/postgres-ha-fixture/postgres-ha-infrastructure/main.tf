@@ -39,9 +39,11 @@ resource "digitalocean_ssh_key" "machine" {
   # fileexists: a delete after a completed delete renders this stack with the
   # key files already gone (the keypair cleanup is the last step) and tofu
   # evaluates file() even while destroying an empty state. A real create has
-  # generated the file in preflight before this renders, so the empty branch
-  # is never applied.
-  public_key = fileexists("/home/build-placeholder/.ssh/postgres-ha-fixture.pub") ? trimspace(file("/home/build-placeholder/.ssh/postgres-ha-fixture.pub")) : ""
+  # generated the file in preflight before this renders, so the placeholder
+  # is never applied; the provider validates the value at plan time, which
+  # is why it is a well-formed key line and not an empty string, and would
+  # reject it at apply if it ever got there.
+  public_key = fileexists("/home/build-placeholder/.ssh/postgres-ha-fixture.pub") ? trimspace(file("/home/build-placeholder/.ssh/postgres-ha-fixture.pub")) : "ssh-ed25519 PLACEHOLDER managed-by-colors"
 }
 
 # One resource with a count rather than three addressed resources: the nodes
