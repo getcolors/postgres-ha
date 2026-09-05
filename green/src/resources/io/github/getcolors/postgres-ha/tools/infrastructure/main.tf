@@ -129,3 +129,23 @@ output "node_public_ips" {
 output "node_private_ips" {
   value = digitalocean_droplet.node[*].ipv4_address_private
 }
+
+# The Compute Cluster Standard's `params`: the one output every later stage
+# reads. The outputs above stay so no state output disappears; after adoption
+# nothing reads them but the legacy translation.
+output "params" {
+  value = {
+    provider     = "digitalocean"
+    vpc_id       = data.digitalocean_vpc.default.id
+    vpc_ip_range = data.digitalocean_vpc.default.ip_range
+    nodes = [for i, d in digitalocean_droplet.node : {
+      index  = i
+      role   = null
+      name   = d.name
+      ip     = d.ipv4_address
+      vpc_ip = d.ipv4_address_private
+      user   = "root"
+      sudoer = "root"
+    }]
+  }
+}

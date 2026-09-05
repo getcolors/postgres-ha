@@ -70,6 +70,11 @@ failures.
 ./green psql                      # a session on the current primary
 ```
 
+The verbs reach the nodes through the `~/.ssh/config` aliases the local stage
+writes — `<profile>` for node 1 and `<profile>-0`, `<profile>-1`, `<profile>-2`
+for each node, the Compute Cluster Standard's names, which replaced the
+`<profile>-1..3` aliases the package wrote before it adopted the standard.
+
 ## Recovery
 
 See [Recovery](skills/package-postgres-ha-green/references/configuration.md#recovery)

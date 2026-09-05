@@ -31,7 +31,7 @@ refuses to run when it is set; that is the guard working.
 
 | Key | Meaning |
 |---|---|
-| `profile` | names the work directory, the state keys and the SSH aliases |
+| `profile` | names the work directory, the state keys and the SSH aliases: `<profile>` reaches node 1, `<profile>-0`, `<profile>-1` and `<profile>-2` each node |
 | `workdir` | generated-output root, `.colors` |
 | `provider-compute` | must be `digitalocean` |
 | `provider-dns` | must be `cloudflare` |
@@ -161,10 +161,11 @@ healthy cluster and stops meaning anything.
 | `digitalocean-client-sources` | CIDRs allowed to reach the endpoint ports |
 | `digitalocean-vpc-mode` | must be `default` |
 
-Neither source list may contain `0.0.0.0/0`. There is no VPC key: any of
-`digitalocean-vpc-id`, `-uuid`, `-cidr`, `-name` present in the file is an
-error, because accepting one would let a deployment be edited onto another's
-private network while passing every other check.
+Each source list must hold at least one IPv4 or IPv6 CIDR and neither may
+contain `0.0.0.0/0`. There is no VPC key: any of `digitalocean-vpc-id`,
+`-uuid`, `-cidr`, `-name` present in the file is an error, because accepting
+one would let a deployment be edited onto another's private network while
+passing every other check.
 
 ## What is deliberately not authenticated
 
@@ -221,7 +222,7 @@ The repository holds `backup-retention-full` full backups and every WAL segment
 since the oldest of them. To recover the cluster to a chosen moment:
 
 1. Stop Patroni on **every** node, so nothing races the restore:
-   `for n in 1 2 3; do ssh <profile>-$n systemctl stop patroni; done`
+   `for n in 0 1 2; do ssh <profile>-$n systemctl stop patroni; done`
 2. On the node that will become the new primary, clear the data directory and
    restore:
    ```sh

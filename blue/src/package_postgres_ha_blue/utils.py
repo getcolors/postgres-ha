@@ -2,9 +2,10 @@
 io.github.getcolors.postgres-ha.utils.
 
 Everything here is a pure function of desired state. The topology is derived
-rather than configured: three nodes with stable ordinals, stable Ansible
-aliases, and stable droplet names, so an OpenTofu address and an inventory
-host name never move because a list was reordered."""
+rather than configured: three nodes with stable ordinals and stable droplet
+names, so an OpenTofu address and an inventory host name never move because
+a list was reordered. The `~/.ssh/config` aliases are the Compute Cluster
+Standard's, derived by ONCE and wrapped in `tools.ssh_alias`."""
 
 from __future__ import annotations
 
@@ -35,16 +36,6 @@ def node_name(opts: dict, n: int) -> str:
     and the Patroni member name. One string for all three keeps `patronictl
     list`, `tofu state list` and the inventory mutually greppable."""
     return f"{base_name(opts)}-{n}"
-
-
-def profile_alias(opts: dict) -> str:
-    profile = str(opts.get("profile") or "")
-    return profile if profile else "postgres-ha"
-
-
-def ssh_alias(opts: dict, n: int) -> str:
-    """The `~/.ssh/config` Host entry the operator commands use for ordinal `n`."""
-    return f"{profile_alias(opts)}-{n}"
 
 
 def par_lookup(key: str) -> str:

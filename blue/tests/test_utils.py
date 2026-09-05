@@ -10,14 +10,11 @@ def test_topology_is_derived_not_configured():
     assert utils.NODE_COUNT == 3
     assert [utils.node_name(OPTS, n) for n in utils.ordinals()] == \
         ["postgres-ha-1", "postgres-ha-2", "postgres-ha-3"]
-    assert [utils.ssh_alias(OPTS, n) for n in utils.ordinals()] == \
-        ["pg-1", "pg-2", "pg-3"]
 
 
 def test_names_fall_back_rather_than_rendering_nil():
     # a half-populated desired state still renders reviewable names
     assert utils.node_name({}, 1) == "postgres-ha-1"
-    assert utils.ssh_alias({}, 1) == "postgres-ha-1"
     assert utils.node_name({"digitalocean-name": ""}, 1) == "postgres-ha-1"
 
 

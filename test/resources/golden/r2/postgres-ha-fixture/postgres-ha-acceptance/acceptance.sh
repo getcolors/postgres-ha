@@ -16,7 +16,7 @@ NODES=3
 MAX_AGE_HOURS=26
 CONNECT_TIMEOUT=5
 SSH_CONFIG="$HOME/.ssh/config"
-ALIASES=("postgres-ha-fixture-1" "postgres-ha-fixture-2" "postgres-ha-fixture-3" )
+ALIASES=("postgres-ha-fixture-0" "postgres-ha-fixture-1" "postgres-ha-fixture-2" )
 
 failures=0
 checks=0

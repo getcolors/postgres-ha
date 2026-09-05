@@ -66,7 +66,10 @@ the cluster is degraded.
 - Build and dry-run are credential-free, which is what makes them the safe way
   to review a `colors.yml` edit.
 - Validation refuses every VPC identifier: the regional default VPC is
-  discovered by an OpenTofu data source.
+  discovered by an OpenTofu data source. Every machine in that VPC is inside
+  the cluster's east-west trust boundary — the VPC-scoped firewall rules take
+  its `ip_range` as their source — which the Compute Cluster Standard names as
+  a security exception of a discovered network.
 
 ## Things that look like details and are not
 
@@ -94,13 +97,32 @@ the cluster is degraded.
 
 ## Coupling
 
-The package pins Green in `green/deps.edn`, the Red SDK in `red/package.json`,
-and the Blue SDK in `blue/pyproject.toml` — and nothing else: it owns its
-provider registry, its OpenTofu templates and its stage names, so there is no
-ONCE pin in any colour. Develop across the boundary with `GREEN_LIB_ROOT` and
+The package pins the SDK — Green in `green/deps.edn`, the Red SDK in
+`red/package.json`, the Blue SDK in `blue/pyproject.toml` — and ONCE, in the
+same three manifests, for one namespace: `compute-cluster`
+(`io.github.getcolors.once.compute-cluster`, `package-once-red`'s
+`computeCluster`, `package_once_blue.compute_cluster`), the one implementation
+of the Compute Cluster Standard (`workspace/standards/compute-cluster.md`).
+The package owns its provider registry, its OpenTofu templates and its stage
+names; its `compute-providers` registry and `spec` (one homogeneous role of
+`cluster-nodes` nodes, fallback offset 11, the `10.114.0.0/20` fallback
+subnet, a discovered network), its own validators — the fixed node count, the
+`default` VPC mode, the `0.0.0.0/0` refusal on both source lists — and its
+`params-errors`; ONCE owns selection, the source lists, the network and
+topology checks, the fallback nodes, the aliases, `read-state`,
+`adopt-state`, `resolved-cluster` and the provider-switch guard. The compute
+state is the template's `params` output — `provider`, `vpc_id`,
+`vpc_ip_range`, and one node per droplet — adopted under `:once/cluster`; a
+pre-adoption state, which recorded only the parallel
+`node_public_ips`/`node_private_ips` lists, is translated into the same shape
+by the reader in `tools`, and refused when the lists disagree. The
+`~/.ssh/config` block is the SSH Config Standard's: one block marked with the
+profile, `Host <profile>` for node 1 and `<profile>-<index>` per node; the
+play removes the pre-standard per-node blocks for one pin cycle. Develop
+across the boundary with `GREEN_LIB_ROOT`, `ONCE_LIB_ROOT` and
 `POSTGRES_HA_LIB_ROOT` (the repository root, for every colour; red also
 accepts the `red/` dir directly); a change spanning two repositories is two
-commits, the SDK pushed first. Final launcher pins are stamped only by
+commits, the upstream pushed first. Final launcher pins are stamped only by
 `bb pin` (in `green/`), which stamps all three payloads from their unpinned
 birth forms after a clean pushed commit. Never invent or hand-edit a SHA.
 

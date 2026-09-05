@@ -45,7 +45,8 @@ def test_operator_verbs_dispatch_through_the_managed_ssh_alias():
     argv = operator.command("status", FIXTURE, 2, [])
     assert argv[0] == "ssh"
     assert any(str(a).endswith(".ssh/config") for a in argv)
-    assert any(a == "postgres-ha-fixture-2" for a in argv)
+    # `--node 2` is the second node: ONCE's alias for index 1
+    assert any(a == "postgres-ha-fixture-1" for a in argv)
     assert "patronictl" in argv[-1]
 
 

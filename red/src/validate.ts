@@ -1,9 +1,15 @@
 // Credential-free desired-state validation, and the provider registry it
 // uses — the port of io.github.getcolors.postgres-ha.validate.
 //
-// The registry is package-owned rather than inherited from ONCE: this package
-// provisions three droplets, its own firewall and its own DNS record set, so
-// the keys a stage interpolates are not ONCE's single-server keys.
+// The compute registry is package-owned — this package provisions three
+// droplets, its own firewall and its own DNS record set, so the keys a stage
+// interpolates are not ONCE's single-server keys — and the operations over it
+// are ONCE's `computeCluster` module, the one implementation of the Compute
+// Cluster Standard: selection, the required keys, the source lists, the
+// provider rules, the network mode and the topology are checked there over
+// `spec`, never copied here. What stays here is what only this package knows:
+// the fixed node count, the discovered VPC, the scoped ingress, and every
+// PostgreSQL, Patroni, etcd, HAProxy and pgBackRest rule.
 //
 // Green renders its keys as Clojure keywords, so every message here carries
 // the same leading colon — the three colours must report identical errors for
@@ -16,19 +22,53 @@
 import { parName } from "red/cli";
 import type { Registry } from "red/providers";
 import type { Opts } from "red/workflow";
+import { compute, computeCluster } from "package-once-red";
 import * as utils from "./utils.ts";
 
-export const providers: Registry = {
-  "provider-compute": {
-    digitalocean: {
-      required: ["digitalocean-name", "digitalocean-region", "digitalocean-size",
-                 "digitalocean-image", "digitalocean-ssh-keys",
-                 "digitalocean-ssh-private-key", "digitalocean-ssh-sources",
-                 "digitalocean-client-sources", "digitalocean-vpc-mode"],
-      secrets: ["do-token"],
-      tofuEnv: { "do-token": "DIGITALOCEAN_TOKEN" },
-    },
+// provider-compute -> what that choice implies.
+//
+// `required` are non-secret keys the template interpolates. `secrets` arrive
+// only through `COLORS_PAR_*`. `tofuEnv` is the subset OpenTofu reads
+// natively from the process environment, so a credential never has to be
+// rendered into a .tf file sitting in the work directory in plaintext.
+// `network` is discovered: the region's default VPC, never one this package
+// owns. `digitalocean-ssh-keys` stays a required literal key; the SSH Keypair
+// Standard is a separate adoption.
+export const computeProviders: computeCluster.ClusterRegistry = {
+  digitalocean: {
+    required: ["digitalocean-name", "digitalocean-region", "digitalocean-size",
+               "digitalocean-image", "digitalocean-ssh-keys",
+               "digitalocean-ssh-private-key", "digitalocean-ssh-sources",
+               "digitalocean-client-sources", "digitalocean-vpc-mode"],
+    secrets: ["do-token"],
+    tofuEnv: { "do-token": "DIGITALOCEAN_TOKEN" },
+    network: { mode: "discovered" },
   },
+};
+
+// The provider a deployment created before this package recorded one in its
+// compute output must be running: the only one it ever offered.
+export const defaultComputeProvider = "digitalocean";
+
+// How this package describes itself to ONCE's `computeCluster`. One
+// homogeneous role of `cluster-nodes` members, whose fallback addresses start
+// at offset 11 so that `build` renders the same 192.0.2.11-13 and
+// 10.114.0.11-13 it always did. The fallback subnet stands in for the
+// discovered VPC's range on a build; on a real run the range is the compute
+// state's `vpc_ip_range`.
+export const spec: computeCluster.ClusterSpec = {
+  registry: computeProviders,
+  default: defaultComputeProvider,
+  sources: { nonEmpty: ["ssh-sources", "client-sources"], mayBeEmpty: [] },
+  roles: [{ role: null, countKey: "cluster-nodes", count: 3, fallbackOffset: 11 }],
+  fallbackSubnet: "10.114.0.0/20",
+};
+
+// Provider slot -> provider name -> what that choice implies. The compute slot
+// is the registry above, so the OpenTofu environment and the secrets are read
+// from one place whichever slot a stage asks for.
+export const providers: Registry = {
+  "provider-compute": computeProviders,
 
   "provider-dns": {
     cloudflare: {
@@ -60,6 +100,10 @@ export const providers: Registry = {
 };
 
 export const slots = ["provider-compute", "provider-dns", "provider-backend"];
+
+// The slots this package selects and checks itself; the compute slot is ONCE's.
+export const ownSlots = ["provider-dns", "provider-backend"];
+
 export const profilePar = parName("profile");
 
 export const ownRequired = [
@@ -86,9 +130,11 @@ export const ownSecrets = [
 // A VPC is discovered, never described. Accepting any of these would let one
 // deployment place its nodes on another's network while still passing every
 // other check, so their mere presence is an error rather than a warning.
+// `digitalocean-vpc-uuid` and `digitalocean-vpc-cidr` are refused by ONCE's
+// discovered-network rule with its own message; these are the spellings only
+// this package refuses.
 export const forbiddenVpcKeys = [
-  "digitalocean-vpc-id", "digitalocean-vpc-uuid", "digitalocean-vpc-cidr",
-  "digitalocean-vpc-name", "digitalocean-vpc",
+  "digitalocean-vpc-id", "digitalocean-vpc-name", "digitalocean-vpc",
 ];
 
 export function placeholder(x: unknown): boolean {
@@ -106,8 +152,8 @@ export function tofuEnv(opts: Opts, slot: string): Record<string, string> {
   return entry(opts, slot)?.tofuEnv ?? {};
 }
 
-function slotKeys(opts: Opts, field: "required" | "secrets"): string[] {
-  return slots.flatMap((slot) => entry(opts, slot)?.[field] ?? []);
+function slotKeys(opts: Opts, selected: string[], field: "required" | "secrets"): string[] {
+  return selected.flatMap((slot) => entry(opts, slot)?.[field] ?? []);
 }
 
 function missing(opts: Opts, keys: string[]): string[] {
@@ -125,7 +171,6 @@ export function envErrors(env: Record<string, string | undefined>): string[] | u
 
 const dnsRe =
   /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
-const cidrRe = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}\/(?:[0-9]|[12][0-9]|3[0-2])$/;
 const profileRe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
 const identifierRe = /^[a-z_][a-z0-9_]{0,62}$/;
 const stanzaRe = /^[a-z][a-z0-9-]{0,31}$/;
@@ -138,12 +183,6 @@ const sha256Re = /^[0-9a-f]{64}$/;
 const oncalendarRe = /^[A-Za-z0-9 *,./:-]+$/;
 const httpsRe = /^https:\/\/[A-Za-z0-9.-]+(?::[0-9]+)?\/?$/;
 const prefixRe = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
-
-export function validCidr(value: unknown): boolean {
-  const text = String(value);
-  if (!cidrRe.test(text)) return false;
-  return text.split("/")[0]!.split(".").every((octet) => Number(octet) <= 255);
-}
 
 function positiveInt(x: unknown): boolean {
   return typeof x === "number" && Number.isInteger(x) && x > 0;
@@ -198,22 +237,28 @@ function distinctPortErrors(opts: Opts): string[] {
   ];
 }
 
+// Everything wrong with `opts` that does not depend on a credential. Empty
+// means the desired state renders. The missing keys are this package's, the
+// selected compute provider's (ONCE's `requiredKeys`) and the other slots';
+// the package's own rules follow; the Compute Cluster Standard's — selection,
+// the source lists, the provider and network rules, the topology — are ONCE's
+// over `spec`; and the ingress scope this package alone insists on comes last.
 export function stateErrors(opts: Opts): string[] {
   const errors: string[] = [];
   const push = (condition: unknown, message: string) => {
     if (condition) errors.push(message);
   };
 
-  for (const key of missing(opts, [...ownRequired, ...slotKeys(opts, "required")])) {
+  for (const key of missing(opts, [...ownRequired,
+                                   ...compute.requiredKeys(spec, opts),
+                                   ...slotKeys(opts, ownSlots, "required")])) {
     errors.push(`:${key} is required`);
   }
 
-  for (const slot of slots) {
+  for (const slot of ownSlots) {
     if (!entry(opts, slot)) errors.push(`unsupported :${slot} ${prStr(opts[slot])}`);
   }
 
-  push(opts["provider-compute"] !== "digitalocean",
-       ":provider-compute must be digitalocean");
   push(opts["provider-dns"] !== "cloudflare", ":provider-dns must be cloudflare");
   push(typeof opts["compute-prevent-destroy"] !== "boolean",
        ":compute-prevent-destroy must be true or false");
@@ -246,18 +291,6 @@ export function stateErrors(opts: Opts): string[] {
   push(!placeholder(opts["cluster-host"]) && !placeholder(opts["cloudflare-zone"]) &&
        !(host === zone || host.endsWith(`.${zone}`)),
        ":cluster-host must be inside :cloudflare-zone");
-
-  for (const key of ["digitalocean-ssh-sources", "digitalocean-client-sources"]) {
-    const values = opts[key];
-    push(!Array.isArray(values) || values.length === 0 ||
-         values.some((value) => !validCidr(value)),
-         `:${key} must be a non-empty list of IPv4 CIDRs`);
-  }
-  for (const key of ["digitalocean-ssh-sources", "digitalocean-client-sources"]) {
-    const values = opts[key];
-    push(Array.isArray(values) && values.some((value) => String(value) === "0.0.0.0/0"),
-         `:${key} must not contain 0.0.0.0/0; administrative and database ingress stay scoped`);
-  }
 
   const pgVersion = opts["postgres-version"];
   push(!positiveInt(pgVersion),
@@ -361,11 +394,20 @@ export function stateErrors(opts: Opts): string[] {
        "fails on a healthy cluster, because a segment is only archived " +
        "once archive_timeout elapses");
 
+  errors.push(...computeCluster.stateErrors(spec, opts));
+
+  // ONCE checks that each source list is non-empty and every entry a CIDR;
+  // the world is a CIDR, and refusing it is this package's own rule: the
+  // PostgreSQL port is a genuinely public port.
+  for (const key of ["digitalocean-ssh-sources", "digitalocean-client-sources"]) {
+    push(compute.cidrs(opts, key).some((value) => value === "0.0.0.0/0"),
+         `:${key} must not contain 0.0.0.0/0; administrative and database ingress stay scoped`);
+  }
+
   return errors;
 }
 
 export function secretErrors(opts: Opts, selected: string[] = slots): string[] {
-  const secretKeys = selected.flatMap((slot) => entry(opts, slot)?.secrets ?? []);
-  return [...new Set(missing(opts, [...ownSecrets, ...secretKeys]))]
+  return [...new Set(missing(opts, [...ownSecrets, ...slotKeys(opts, selected, "secrets")]))]
     .map((key) => `required credential is not set: ${parName(key)}`);
 }

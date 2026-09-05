@@ -48,7 +48,9 @@ infra="$base/postgres-ha-infrastructure/main.tf"
 grep -q 'data "digitalocean_vpc" "default"' "$infra"
 grep -q 'region = "ams3"' "$infra"
 grep -q 'vpc_uuid = data.digitalocean_vpc.default.id' "$infra"
-if grep -qE 'digitalocean_vpc" "(cluster|owned)"|ip_range *=' "$infra"; then
+# An `ip_range` attribute is a VPC being described; the `vpc_ip_range` key of
+# the `params` output reports the discovered one and is not that.
+if grep -qE 'digitalocean_vpc" "(cluster|owned)"|^\s*ip_range *=' "$infra"; then
   echo 'golden: the deployment creates or describes a VPC instead of discovering one' >&2
   exit 1
 fi
@@ -68,7 +70,7 @@ if grep -A1 'source_addresses = \[' "$infra" | grep -q '0.0.0.0/0'; then
   echo 'golden: an inbound rule admits the world' >&2; exit 1
 fi
 grep -q 'source_addresses = \[data.digitalocean_vpc.default.ip_range\]' "$infra"
-for output in vpc_id vpc_ip_range node_public_ips node_private_ips; do
+for output in vpc_id vpc_ip_range node_public_ips node_private_ips params; do
   grep -q "output \"$output\"" "$infra" || {
     echo "golden: infrastructure no longer publishes $output" >&2; exit 1
   }

@@ -7,21 +7,23 @@
   name. Fanning any of it out would only buy back the seconds that DigitalOcean
   spends creating three droplets in one `apply` anyway.
 
-  Delete runs the same edges backwards, with one addition: it loads the node
-  addresses out of remote state first, because the local SSH configuration it
-  has to withdraw is keyed by them and by then the droplets may already be
-  gone."
+  Delete runs the same edges backwards, with one addition: it adopts the
+  cluster out of remote state first, because the local SSH configuration it
+  has to withdraw is keyed by the nodes and by then the droplets may already
+  be gone. The state is read once, in preflight, so the Compute Provider
+  Standard's switch guard runs before the credentials are checked; the read is
+  handed to `load-infrastructure` rather than repeated."
   (:require [green.cli :as green-cli]
             [green.dry-run :as dry-run]
             [green.lifecycle :as lifecycle]
             [green.progress :as progress]
-            [green.tofu :as tofu]
             [green.workflow :as wf]
+            [io.github.getcolors.once.compute-cluster :as cluster]
             [io.github.getcolors.postgres-ha.tools :as tools]
             [io.github.getcolors.postgres-ha.validate :as validate]))
 
 (def defaults
-  {:provider-compute "digitalocean"
+  {:provider-compute validate/default-compute-provider
    :provider-dns "cloudflare"
    :provider-backend "local"
    :compute-prevent-destroy true
@@ -55,28 +57,54 @@
 
 (def lifecycle-events #{:create :delete})
 
+(defn- real-lifecycle-event? [{:keys [event real?]}]
+  (boolean (and real? (lifecycle-events event))))
+
 (defn start-step
+  "Preflight. On a real create or delete the compute state is read once
+  through `reader` — the package's `tools/state-output` unless a test injects
+  another — on the same defaulted and overlaid opts the validators see, and
+  only once desired state itself has passed, so the reader never renders an
+  invalid colors.yml. The read feeds the switch guard here and travels on
+  under `:postgres-ha/state` for `load-infrastructure` to adopt.
+
+  Credentials are only demanded by a run that will actually use them. `build`
+  and `--dry-run` therefore work on a fresh checkout with an empty
+  environment, which is what makes them a safe way to review a colors.yml
+  edit."
   ([opts] (start-step opts (System/getenv)))
-  ([opts env]
-   (lifecycle/preflight
-    opts
-    {:defaults defaults
-     :overlay green-cli/read-pars
-     :validators
-     [(fn [_ env _] (validate/env-errors env))
-      (fn [opts _ _] (validate/state-errors opts))
-      ;; Credentials are only demanded by a run that will actually use them.
-      ;; `build` and `--dry-run` therefore work on a fresh checkout with an
-      ;; empty environment, which is what makes them a safe way to review a
-      ;; colors.yml edit.
-      (fn [opts _ {:keys [event real?]}]
-        (when (and real? (lifecycle-events event)) (validate/secret-errors opts)))
-      (fn [opts _ {:keys [event real?]}]
-        (when (and real? (= :delete event) (:compute-prevent-destroy opts))
-          [(str "compute destruction is protected; set "
-                (green-cli/par-name :compute-prevent-destroy)
-                "=false for this one delete")]))]}
-    env)))
+  ([opts env] (start-step opts env tools/state-output))
+  ([opts env reader]
+   (let [overlaid (green-cli/read-pars (merge defaults opts) env)
+         context {:event (:green/event overlaid) :real? (lifecycle/real-run? overlaid)}
+         state (when (and (real-lifecycle-event? context)
+                          (empty? (validate/env-errors env))
+                          (empty? (validate/state-errors overlaid)))
+                 (cluster/read-state overlaid reader))]
+     (lifecycle/preflight
+      opts
+      {:defaults defaults
+       :overlay green-cli/read-pars
+       :validators
+       [(fn [_ env _] (validate/env-errors env))
+        (fn [opts _ _] (validate/state-errors opts))
+        ;; Standard §4 before the credentials: a recorded provider that differs
+        ;; from the selected one reports the actionable error, not a missing
+        ;; token for the provider that was just selected.
+        (fn [opts _ ctx]
+          (when (real-lifecycle-event? ctx)
+            (cluster/provider-validator validate/spec opts (:params state)
+                                        #(validate/secret-errors opts))))
+        (fn [opts _ {:keys [event real?]}]
+          (when (and real? (= :delete event) (:compute-prevent-destroy opts))
+            [(str "compute destruction is protected; set "
+                  (green-cli/par-name :compute-prevent-destroy)
+                  "=false for this one delete")]))]
+       :after-validate
+       (fn [opts _ ctx]
+         (cond-> (assoc opts :green/exit 0)
+           (real-lifecycle-event? ctx) (assoc :postgres-ha/state state)))}
+      env))))
 
 (defn wire-fn
   [step run-opts]
@@ -100,10 +128,10 @@
       :postgres-ha/acceptance [tools/acceptance-step])))
 
 (defn backend-advice
+  "The state backend of one OpenTofu stage: `tools/backend-advice`, which the
+  state reader also runs, so a delete from a fresh clone finds its state."
   [tool]
-  (tofu/conventional-backend-advice
-   {:dir-fn #(tools/tool-dir % tool)
-    :key-fn #(str (:profile %) "/" tool ".tfstate")}))
+  (tools/backend-advice tool))
 
 (def side-effecting-steps
   [:postgres-ha/load-infrastructure :postgres-ha/infrastructure

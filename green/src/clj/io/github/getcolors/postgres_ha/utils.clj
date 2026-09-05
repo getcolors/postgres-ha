@@ -2,9 +2,10 @@
   "Launcher contract and deterministic topology helpers.
 
   Everything here is a pure function of desired state. The topology is derived
-  rather than configured: three nodes with stable ordinals, stable Ansible
-  aliases, and stable droplet names, so an OpenTofu address and an inventory
-  host name never move because a list was reordered."
+  rather than configured: three nodes with stable ordinals and stable droplet
+  names, so an OpenTofu address and an inventory host name never move because
+  a list was reordered. The `~/.ssh/config` aliases are the Compute Cluster
+  Standard's, derived by ONCE and wrapped in `tools/ssh-alias`."
   (:require [clojure.string :as str]))
 
 (def contract
@@ -33,15 +34,6 @@
   `tofu state list` and the inventory mutually greppable."
   [opts n]
   (str (base-name opts) "-" n))
-
-(defn profile-alias
-  [opts]
-  (or (not-empty (str (:profile opts))) "postgres-ha"))
-
-(defn ssh-alias
-  "The `~/.ssh/config` Host entry the operator commands use for ordinal `n`."
-  [opts n]
-  (str (profile-alias opts) "-" n))
 
 (defn par-lookup
   "The Ansible expression that reads a credential at play time.

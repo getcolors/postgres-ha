@@ -1,9 +1,15 @@
 """Credential-free desired-state validation, and the provider registry it
 uses — the port of io.github.getcolors.postgres-ha.validate.
 
-The registry is package-owned rather than inherited from ONCE: this package
-provisions three droplets, its own firewall and its own DNS record set, so the
-keys a stage interpolates are not ONCE's single-server keys.
+The compute registry is package-owned — this package provisions three
+droplets, its own firewall and its own DNS record set, so the keys a stage
+interpolates are not ONCE's single-server keys — and the operations over it
+are ONCE's ``compute_cluster`` module, the one implementation of the Compute
+Cluster Standard: selection, the required keys, the source lists, the
+provider rules, the network mode and the topology are checked there over
+``spec``, never copied here. What stays here is what only this package knows:
+the fixed node count, the discovered VPC, the scoped ingress, and every
+PostgreSQL, Patroni, etcd, HAProxy and pgBackRest rule.
 
 Green renders its keys as Clojure keywords, so every message here carries the
 same leading colon — the three colours must report identical errors for one
@@ -19,20 +25,55 @@ import json
 import re
 
 from blue.cli import par_name
+from package_once_blue import compute as once_compute
+from package_once_blue import compute_cluster as cluster
 
 from . import utils
 
-providers = {
-    "provider-compute": {
-        "digitalocean": {
-            "required": ["digitalocean-name", "digitalocean-region", "digitalocean-size",
-                         "digitalocean-image", "digitalocean-ssh-keys",
-                         "digitalocean-ssh-private-key", "digitalocean-ssh-sources",
-                         "digitalocean-client-sources", "digitalocean-vpc-mode"],
-            "secrets": ["do-token"],
-            "tofu-env": {"do-token": "DIGITALOCEAN_TOKEN"},
-        },
+# provider-compute -> what that choice implies.
+#
+# `required` are non-secret keys the template interpolates. `secrets` arrive
+# only through `COLORS_PAR_*`. `tofu-env` is the subset OpenTofu reads
+# natively from the process environment, so a credential never has to be
+# rendered into a .tf file sitting in the work directory in plaintext.
+# `network` is discovered: the region's default VPC, never one this package
+# owns. `digitalocean-ssh-keys` stays a required literal key; the SSH Keypair
+# Standard is a separate adoption.
+compute_providers = {
+    "digitalocean": {
+        "required": ["digitalocean-name", "digitalocean-region", "digitalocean-size",
+                     "digitalocean-image", "digitalocean-ssh-keys",
+                     "digitalocean-ssh-private-key", "digitalocean-ssh-sources",
+                     "digitalocean-client-sources", "digitalocean-vpc-mode"],
+        "secrets": ["do-token"],
+        "tofu-env": {"do-token": "DIGITALOCEAN_TOKEN"},
+        "network": {"mode": "discovered"},
     },
+}
+
+# The provider a deployment created before this package recorded one in its
+# compute output must be running: the only one it ever offered.
+default_compute_provider = "digitalocean"
+
+# How this package describes itself to ONCE's `compute_cluster`. One
+# homogeneous role of `cluster-nodes` members, whose fallback addresses start
+# at offset 11 so that `build` renders the same 192.0.2.11-13 and
+# 10.114.0.11-13 it always did. The fallback subnet stands in for the
+# discovered VPC's range on a build; on a real run the range is the compute
+# state's `vpc_ip_range`.
+spec: cluster.ClusterSpec = {
+    "registry": compute_providers,
+    "default": default_compute_provider,
+    "sources": {"non_empty": ["ssh-sources", "client-sources"], "may_be_empty": []},
+    "roles": [{"role": None, "count_key": "cluster-nodes", "count": 3, "fallback_offset": 11}],
+    "fallback_subnet": "10.114.0.0/20",
+}
+
+# Provider slot -> provider name -> what that choice implies. The compute slot
+# is the registry above, so the OpenTofu environment and the secrets are read
+# from one place whichever slot a stage asks for.
+providers = {
+    "provider-compute": compute_providers,
 
     "provider-dns": {
         "cloudflare": {
@@ -65,6 +106,10 @@ providers = {
 }
 
 slots = ["provider-compute", "provider-dns", "provider-backend"]
+
+# The slots this package selects and checks itself; the compute slot is ONCE's.
+own_slots = ["provider-dns", "provider-backend"]
+
 profile_par = par_name("profile")
 
 own_required = [
@@ -91,9 +136,11 @@ own_secrets = [
 # A VPC is discovered, never described. Accepting any of these would let one
 # deployment place its nodes on another's network while still passing every
 # other check, so their mere presence is an error rather than a warning.
+# `digitalocean-vpc-uuid` and `digitalocean-vpc-cidr` are refused by ONCE's
+# discovered-network rule with its own message; these are the spellings only
+# this package refuses.
 forbidden_vpc_keys = [
-    "digitalocean-vpc-id", "digitalocean-vpc-uuid", "digitalocean-vpc-cidr",
-    "digitalocean-vpc-name", "digitalocean-vpc",
+    "digitalocean-vpc-id", "digitalocean-vpc-name", "digitalocean-vpc",
 ]
 
 
@@ -109,8 +156,8 @@ def tofu_env(opts: dict, slot: str) -> dict:
     return (entry(opts, slot) or {}).get("tofu-env", {})
 
 
-def _slot_keys(opts: dict, field: str) -> list[str]:
-    return [key for slot in slots for key in (entry(opts, slot) or {}).get(field, [])]
+def _slot_keys(opts: dict, selected: list[str], field: str) -> list[str]:
+    return [key for slot in selected for key in (entry(opts, slot) or {}).get(field, [])]
 
 
 def _missing(opts: dict, keys: list[str]) -> list[str]:
@@ -127,7 +174,6 @@ def env_errors(env: dict) -> list[str] | None:
 
 _DNS_RE = re.compile(
     r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$")
-_CIDR_RE = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}/(?:[0-9]|[12][0-9]|3[0-2])$")
 _PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 _IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _STANZA_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -140,13 +186,6 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ONCALENDAR_RE = re.compile(r"^[A-Za-z0-9 *,./:-]+$")
 _HTTPS_RE = re.compile(r"^https://[A-Za-z0-9.-]+(?::[0-9]+)?/?$")
 _PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
-
-
-def valid_cidr(value) -> bool:
-    text = str(value)
-    if not _CIDR_RE.fullmatch(text):
-        return False
-    return all(int(octet) <= 255 for octet in text.split("/")[0].split("."))
 
 
 def _positive_int(x) -> bool:
@@ -205,21 +244,28 @@ def _distinct_port_errors(opts: dict) -> list[str]:
 
 
 def state_errors(opts: dict) -> list[str]:
+    """Everything wrong with `opts` that does not depend on a credential.
+    Empty means the desired state renders. The missing keys are this
+    package's, the selected compute provider's (ONCE's `required_keys`) and
+    the other slots'; the package's own rules follow; the Compute Cluster
+    Standard's — selection, the source lists, the provider and network rules,
+    the topology — are ONCE's over `spec`; and the ingress scope this package
+    alone insists on comes last."""
     errors: list[str] = []
 
     def push(condition, message: str) -> None:
         if condition:
             errors.append(message)
 
-    for key in _missing(opts, [*own_required, *_slot_keys(opts, "required")]):
+    for key in _missing(opts, [*own_required,
+                               *once_compute.required_keys(spec, opts),
+                               *_slot_keys(opts, own_slots, "required")]):
         errors.append(f":{key} is required")
 
-    for slot in slots:
+    for slot in own_slots:
         if entry(opts, slot) is None:
             errors.append(f"unsupported :{slot} {_pr_str(opts.get(slot))}")
 
-    push(opts.get("provider-compute") != "digitalocean",
-         ":provider-compute must be digitalocean")
     push(opts.get("provider-dns") != "cloudflare", ":provider-dns must be cloudflare")
     push(not isinstance(opts.get("compute-prevent-destroy"), bool),
          ":compute-prevent-destroy must be true or false")
@@ -252,16 +298,6 @@ def state_errors(opts: dict) -> list[str]:
          and not placeholder(opts.get("cloudflare-zone"))
          and not (host == zone or host.endswith(f".{zone}")),
          ":cluster-host must be inside :cloudflare-zone")
-
-    for key in ["digitalocean-ssh-sources", "digitalocean-client-sources"]:
-        values = opts.get(key)
-        push(not isinstance(values, list) or not values
-             or any(not valid_cidr(value) for value in values),
-             f":{key} must be a non-empty list of IPv4 CIDRs")
-    for key in ["digitalocean-ssh-sources", "digitalocean-client-sources"]:
-        values = opts.get(key)
-        push(isinstance(values, list) and any(str(value) == "0.0.0.0/0" for value in values),
-             f":{key} must not contain 0.0.0.0/0; administrative and database ingress stay scoped")
 
     pg_version = opts.get("postgres-version")
     push(not _positive_int(pg_version),
@@ -361,12 +397,19 @@ def state_errors(opts: dict) -> list[str]:
          "fails on a healthy cluster, because a segment is only archived "
          "once archive_timeout elapses")
 
+    errors.extend(cluster.state_errors(spec, opts))
+
+    # ONCE checks that each source list is non-empty and every entry a CIDR;
+    # the world is a CIDR, and refusing it is this package's own rule: the
+    # PostgreSQL port is a genuinely public port.
+    for key in ["digitalocean-ssh-sources", "digitalocean-client-sources"]:
+        push(any(value == "0.0.0.0/0" for value in once_compute.cidrs(opts, key)),
+             f":{key} must not contain 0.0.0.0/0; administrative and database ingress stay scoped")
+
     return errors
 
 
 def secret_errors(opts: dict, selected: list[str] | None = None) -> list[str]:
     chosen = slots if selected is None else selected
-    secret_keys = [key for slot in chosen
-                   for key in (entry(opts, slot) or {}).get("secrets", [])]
     return [f"required credential is not set: {par_name(key)}"
-            for key in dict.fromkeys(_missing(opts, [*own_secrets, *secret_keys]))]
+            for key in dict.fromkeys(_missing(opts, [*own_secrets, *_slot_keys(opts, chosen, "secrets")]))]

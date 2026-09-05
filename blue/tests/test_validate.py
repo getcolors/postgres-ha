@@ -1,6 +1,7 @@
 import re
 
 from blue.cli import par_name
+from package_once_blue import compute_cluster as cluster
 from package_postgres_ha_blue import validate
 
 from conftest import fixture
@@ -40,12 +41,38 @@ def test_the_profile_overlay_is_refused():
                r"takes profile from colors\.yml only")
 
 
+def test_the_spec_describes_one_homogeneous_role_on_a_discovered_network():
+    # The Compute Cluster Standard's spec is data ONCE reads; this is the one
+    # place its content is asserted, so a drift in any colour is a test
+    # failure and not a rendered surprise.
+    assert cluster.spec_errors(validate.spec) == []
+    assert list(validate.spec["registry"]) == ["digitalocean"]
+    assert validate.spec["default"] == "digitalocean"
+    assert validate.spec["registry"]["digitalocean"]["network"] == {"mode": "discovered"}
+    assert validate.spec["sources"] == {"non_empty": ["ssh-sources", "client-sources"], "may_be_empty": []}
+    assert validate.spec["roles"] == [
+        {"role": None, "count_key": "cluster-nodes", "count": 3, "fallback_offset": 11}]
+    # the bare profile alias reaches node 0
+    assert "entry" not in validate.spec
+    assert validate.spec["fallback_subnet"] == "10.114.0.0/20"
+    assert cluster.topology_errors(validate.spec, FIXTURE) == []
+    # the registry's required keys are demanded through ONCE
+    for key in validate.compute_providers["digitalocean"]["required"]:
+        assert has(errors({key: None}), f"{key} is required"), key
+
+
 def test_the_vpc_is_discovered_and_cannot_be_described():
     # accepting a VPC identifier would let one deployment be edited onto
     # another's private network while passing every other check
     for key in validate.forbidden_vpc_keys:
         assert has(errors({key: "10.0.0.0/16"}),
                    r"must not be configured; the regional default VPC is discovered"), key
+    # the two spellings ONCE knows are refused by its discovered-network rule,
+    # once, with its message
+    assert errors({"digitalocean-vpc-uuid": "00000000-0000-0000-0000-000000000000"}) == \
+        [":digitalocean-vpc-uuid must be absent; the default regional VPC is discovered at runtime"]
+    assert errors({"digitalocean-vpc-cidr": "10.114.0.0/20"}) == \
+        [":digitalocean-vpc-cidr must be absent; this package must not create a VPC"]
     assert has(errors({"digitalocean-vpc-mode": "explicit"}),
                r":digitalocean-vpc-mode must be default")
 
@@ -53,6 +80,14 @@ def test_the_vpc_is_discovered_and_cannot_be_described():
 def test_the_node_budget_is_fixed():
     assert has(errors({"cluster-nodes": 2}), r":cluster-nodes must be 3")
     assert has(errors({"cluster-nodes": 5}), r":cluster-nodes must be 3")
+    # a count that is not a positive integer is ONCE's to refuse too
+    assert has(errors({"cluster-nodes": "3"}), r":cluster-nodes must be a positive integer")
+
+
+def test_only_the_providers_this_package_implements_are_accepted():
+    assert has(errors({"provider-compute": "hcloud"}), r":provider-compute must be one of digitalocean")
+    assert has(errors({"provider-dns": "yandex"}), r"unsupported :provider-dns")
+    assert has(errors({"provider-backend": "gcs"}), r"unsupported :provider-backend")
 
 
 def test_ports_that_share_an_address_must_differ():
@@ -104,11 +139,17 @@ def test_the_client_connect_timeout_is_desired_state_not_folklore():
 
 
 def test_ingress_stays_scoped():
+    # The list and CIDR checks are ONCE's, with its messages; the refusal of
+    # the world is this package's own and holds however the list is spelled.
     for key in ["digitalocean-ssh-sources", "digitalocean-client-sources"]:
-        assert has(errors({key: ["0.0.0.0/0"]}), r"must not contain 0\.0\.0\.0/0")
-        assert has(errors({key: []}), r"must be a non-empty list of IPv4 CIDRs")
-        assert has(errors({key: ["203.0.113.10"]}),
-                   r"must be a non-empty list of IPv4 CIDRs")
+        assert errors({key: ["0.0.0.0/0"]}) == \
+            [f":{key} must not contain 0.0.0.0/0; administrative and database ingress stay scoped"]
+        assert has(errors({key: "203.0.113.10/32, 0.0.0.0/0"}), r"must not contain 0\.0\.0\.0/0")
+        assert errors({key: []}) == [f":{key} must list at least one CIDR"]
+        assert errors({key: ["203.0.113.10"]}) == \
+            [f':{key} entry "203.0.113.10" is not an IPv4 or IPv6 CIDR']
+    # a string is a list, the way an overlay carries one
+    assert errors({"digitalocean-ssh-sources": "203.0.113.10/32, 198.51.100.0/24"}) == []
 
 
 def test_blast_radius_is_separated():

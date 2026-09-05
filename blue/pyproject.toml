@@ -5,10 +5,21 @@ description = "Blue/Python implementation of the postgres-ha package"
 requires-python = ">=3.11"
 dependencies = [
     "blue",
+    "package-once-blue",
 ]
 
 [tool.uv.sources]
 blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
+package-once-blue = { git = "https://github.com/getcolors/once.git", subdirectory = "blue", rev = "b1628b7f8546c10fa9b768565bfd839512cb49ca" }
+
+# The ONCE pin above carries its own blue pin; without this override the two
+# git URLs conflict whenever they differ and uv refuses to resolve. The
+# override makes this package's blue pin the one that wins, the way tools.deps
+# lets the top-level green pin win in green/deps.edn.
+[tool.uv]
+override-dependencies = [
+    "blue @ git+https://github.com/getcolors/blue.git@290f313ead5ca162875c33a049c880da017eae09",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]

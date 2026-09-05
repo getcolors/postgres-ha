@@ -33,7 +33,8 @@
     (let [argv (operator/command :status opts 2 [])]
       (is (= "ssh" (first argv)))
       (is (some #(str/ends-with? (str %) ".ssh/config") argv))
-      (is (some #(= "postgres-ha-fixture-2" %) argv))
+      ;; `--node 2` is the second node: ONCE's alias for index 1.
+      (is (some #(= "postgres-ha-fixture-1" %) argv))
       (is (str/includes? (last argv) "patronictl")))))
 
 (deftest the-verbs-are-the-tools-not-a-second-opinion-about-the-cluster

@@ -17,7 +17,7 @@ import os
 from blue.cli import load_yaml, read_pars
 from blue.process import posix_quote, run_inherit
 
-from . import utils, validate
+from . import tools, utils, validate
 
 KINDS = ("status", "failover", "switchover", "backup", "verify-restore", "psql")
 
@@ -74,7 +74,7 @@ def ssh_command(opts: dict, ordinal: int, remote: list[str], tty: bool) -> list[
     place and this never grows its own copy of them."""
     return ["ssh", "-F", os.path.join(os.path.expanduser("~"), ".ssh/config"),
             *(["-t"] if tty else []),
-            "--", utils.ssh_alias(opts, ordinal),
+            "--", tools.ssh_alias(opts, ordinal),
             " ".join(posix_quote(part) for part in remote)]
 
 

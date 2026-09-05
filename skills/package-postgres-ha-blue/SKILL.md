@@ -54,9 +54,11 @@ verified restore that runs on a schedule.
 ```
 
 Every verb dispatches over SSH through the `~/.ssh/config` aliases the local
-stage manages, so the identity file and host-key policy are defined once.
-`--node N` picks which node to dispatch through; use a live one when the
-cluster is degraded.
+stage manages — one block marked with the profile, holding `Host <profile>`
+for node 1 and `Host <profile>-0`, `<profile>-1`, `<profile>-2` for each node
+— so the identity file and host-key policy are defined once. `--node N` picks
+which node to dispatch through (`--node 2` is `<profile>-1`); use a live one
+when the cluster is degraded.
 
 ## Connecting
 

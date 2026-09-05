@@ -1,11 +1,20 @@
 {:paths ["src/clj" "src/resources"]
  :deps {org.clojure/clojure {:mvn/version "1.12.5"}
-        ;; Green only. This package owns its provider registry, its OpenTofu
-        ;; templates and its stage names, so there is nothing of ONCE's
-        ;; single-server shape to inherit — and one fewer pin between a change
-        ;; here and a deployment that can see it.
+        ;; The two pins move together. Green 3f33f5d is where the SDK reports a
+        ;; tofu launch failure — a missing stage directory, a missing binary —
+        ;; as exit 127 and so as its `tofu output failed:` step error carrying
+        ;; :dir, which is the one shape ONCE's `read-state` counts as an
+        ;; unreadable state; below it a fresh clone's create crashes instead of
+        ;; reporting its credentials. ONCE b1628b7 carries the `compute-cluster`
+        ;; namespace this package delegates to (landed in f8815a4); the ONCE
+        ;; pin cannot go below it. This package still owns its provider
+        ;; registry, its OpenTofu templates and its stage names: what it takes
+        ;; from ONCE is the Compute Cluster Standard's operations over them.
         io.github.getcolors/green {:git/url "https://github.com/getcolors/green.git"
-                                   :git/sha "ceb4159a19ec281d60f10d11295c05c5de5f1c42"}}
+                                   :git/sha "3f33f5d4dcce1f8d97a11b6972e13eb3f0b37654"}
+        io.github.getcolors/once {:git/url "https://github.com/getcolors/once.git"
+                                  :git/sha "b1628b7f8546c10fa9b768565bfd839512cb49ca"
+                                  :deps/root "green"}}
  :aliases {:dev {:extra-paths ["test/clj" "test/resources"]}
            :test {:extra-paths ["test/clj" "test/resources"]
                   :extra-deps {io.github.cognitect-labs/test-runner

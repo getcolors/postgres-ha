@@ -7,22 +7,27 @@ addresses build, and acceptance needs a converged cluster *and* a resolvable
 name. Fanning any of it out would only buy back the seconds that DigitalOcean
 spends creating three droplets in one `apply` anyway.
 
-Delete runs the same edges backwards, with one addition: it loads the node
-addresses out of remote state first, because the local SSH configuration it
-has to withdraw is keyed by them and by then the droplets may already be
-gone."""
+Delete runs the same edges backwards, with one addition: it adopts the cluster
+out of remote state first, because the local SSH configuration it has to
+withdraw is keyed by the nodes and by then the droplets may already be gone.
+The state is read once, in preflight, so the Compute Provider Standard's
+switch guard runs before the credentials are checked; the read is handed to
+`load-infrastructure` rather than repeated."""
 
 from __future__ import annotations
 
-from blue import dry_run, progress, tofu
+import os
+
+from blue import dry_run, progress
 from blue.cli import par_name, read_pars
 from blue.lifecycle import preflight
 from blue.workflow import advice_add, workflow
+from package_once_blue import compute_cluster as cluster
 
 from . import tools, validate
 
 DEFAULTS = {
-    "provider-compute": "digitalocean",
+    "provider-compute": validate.default_compute_provider,
     "provider-dns": "cloudflare",
     "provider-backend": "local",
     "compute-prevent-destroy": True,
@@ -58,23 +63,55 @@ DEFAULTS = {
 LIFECYCLE_EVENTS = ("create", "delete")
 
 
-async def start_step(opts: dict, env: dict | None = None) -> dict:
+def _real_lifecycle_event(context: dict) -> bool:
+    return bool(context.get("real") and context.get("event") in LIFECYCLE_EVENTS)
+
+
+async def start_step(original: dict, env: dict | None = None, reader=None) -> dict:
+    """Preflight. On a real create or delete the compute state is read once
+    through `reader` — the package's `tools.state_output` unless a test
+    injects another — on the same defaulted and overlaid opts the validators
+    see, and only once desired state itself has passed, so the reader never
+    renders an invalid colors.yml. The read feeds the switch guard here and
+    travels on under `postgres-ha/state` for `load-infrastructure` to adopt.
+
+    Credentials are only demanded by a run that will actually use them.
+    `build` and `--dry-run` therefore work on a fresh checkout with an empty
+    environment, which is what makes them a safe way to review a colors.yml
+    edit."""
+    reader = reader if reader is not None else tools.state_output
+    environment = dict(os.environ if env is None else env)
+    overlaid = read_pars({**DEFAULTS, **original}, environment)
+    context = {"event": overlaid.get("blue/event"), "real": not overlaid.get("blue/dry-run")}
+    state: dict = {}
+    if (_real_lifecycle_event(context)
+            and not validate.env_errors(environment)
+            and not validate.state_errors(overlaid)):
+        state = await cluster.read_state(overlaid, reader)
+
+    def after(opts, _env, ctx):
+        result = {**opts, "blue/exit": 0}
+        if _real_lifecycle_event(ctx):
+            result["postgres-ha/state"] = state
+        return result
+
     return await preflight(
-        opts, defaults=DEFAULTS, overlay=read_pars, env=env,
+        original, defaults=DEFAULTS, overlay=read_pars, env=environment,
         validators=[
             lambda _o, e, _c: validate.env_errors(e),
             lambda o, _e, _c: validate.state_errors(o),
-            # Credentials are only demanded by a run that will actually use
-            # them. `build` and `--dry-run` therefore work on a fresh checkout
-            # with an empty environment, which is what makes them a safe way
-            # to review a colors.yml edit.
-            lambda o, _e, c: (validate.secret_errors(o)
-                              if c["real"] and c["event"] in LIFECYCLE_EVENTS else []),
+            # Standard §4 before the credentials: a recorded provider that
+            # differs from the selected one reports the actionable error, not
+            # a missing token for the provider that was just selected.
+            lambda o, _e, c: (cluster.provider_validator(
+                validate.spec, o, state.get("params"), lambda: validate.secret_errors(o))
+                if _real_lifecycle_event(c) else []),
             lambda o, _e, c: (["compute destruction is protected; set "
                                f"{par_name('compute-prevent-destroy')}=false for this one delete"]
                               if c["real"] and c["event"] == "delete"
                               and o.get("compute-prevent-destroy") else []),
-        ])
+        ],
+        after_validate=after)
 
 
 def wire_fn(step: str, run_opts: dict):
@@ -101,9 +138,10 @@ def wire_fn(step: str, run_opts: dict):
 
 
 def backend_advice(tool: str):
-    return tofu.conventional_backend_advice(
-        dir=lambda o, tool=tool: tools.tool_dir(o, tool),
-        key=lambda o, tool=tool: f"{o.get('profile')}/{tool}.tfstate")
+    """The state backend of one OpenTofu stage: `tools.backend_advice`, which
+    the state reader also runs, so a delete from a fresh clone finds its
+    state."""
+    return tools.backend_advice(tool)
 
 
 side_effecting_steps = [

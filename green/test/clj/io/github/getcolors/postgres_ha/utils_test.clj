@@ -8,14 +8,11 @@
   (is (= [1 2 3] (vec (utils/ordinals))))
   (is (= 3 utils/node-count))
   (is (= ["postgres-ha-1" "postgres-ha-2" "postgres-ha-3"]
-         (mapv #(utils/node-name opts %) (utils/ordinals))))
-  (is (= ["pg-1" "pg-2" "pg-3"]
-         (mapv #(utils/ssh-alias opts %) (utils/ordinals)))))
+         (mapv #(utils/node-name opts %) (utils/ordinals)))))
 
 (deftest names-fall-back-rather-than-rendering-nil
   (testing "a half-populated desired state still renders reviewable names"
     (is (= "postgres-ha-1" (utils/node-name {} 1)))
-    (is (= "postgres-ha-1" (utils/ssh-alias {} 1)))
     (is (= "postgres-ha-1" (utils/node-name {:digitalocean-name ""} 1)))))
 
 (deftest par-lookup-names-the-shared-credential-namespace
