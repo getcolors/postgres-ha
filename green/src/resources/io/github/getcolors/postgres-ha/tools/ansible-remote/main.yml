@@ -80,11 +80,22 @@
           - jq
           - python3-psycopg2
         state: present
+        # Always refresh: the DigitalOcean mirror's index and pool can disagree
+        # for minutes after an upstream security push (a 404 on a package the
+        # index still lists, seen live 2026-09-05), and a cache that looks
+        # fresh because cloud-init just wrote it repeats the same 404. Each
+        # retry refreshes the index and waits for the mirror to catch up.
         update_cache: true
-        cache_valid_time: 3600
         # The apt module can wait for the lock; dpkg_selections below cannot,
-        # which is why that one retries instead.
+        # which is why that one retries for the lock. The retry on this task
+        # is for the mirror, not the lock.
         lock_timeout: 300
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: postgres_ha_apt_base
+      until: postgres_ha_apt_base is success
+      retries: 5
+      delay: 20
 
     - name: Install the PGDG repository signing key
       ansible.builtin.get_url:
@@ -116,6 +127,12 @@
           - python3-etcd
         state: present
         lock_timeout: 300
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: postgres_ha_apt_pg
+      until: postgres_ha_apt_pg is success
+      retries: 5
+      delay: 20
 
     # `dpkg_selections` has no lock_timeout of its own, so it retries. The lock
     # is held by unattended-upgrades, which finishes on its own.
