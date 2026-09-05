@@ -4,7 +4,7 @@
 # dependencies = ["package-postgres-ha-blue", "blue"]
 #
 # [tool.uv.sources]
-# package-postgres-ha-blue = { git = "https://github.com/getcolors/postgres-ha.git", rev = "2d73cf76e9d420443ea400d0025c8313919fcdbe", subdirectory = "blue" }
+# package-postgres-ha-blue = { git = "https://github.com/getcolors/postgres-ha.git", rev = "4218bb18ca2272665c61ff1d417dc667c46bfeb8", subdirectory = "blue" }
 # blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
 #
 # [tool.uv]
