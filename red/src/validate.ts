@@ -23,6 +23,7 @@ import { parName } from "red/cli";
 import type { Registry } from "red/providers";
 import type { Opts } from "red/workflow";
 import { compute, computeCluster } from "package-once-red";
+import { onceSsh } from "./once.ts";
 import * as utils from "./utils.ts";
 
 // provider-compute -> what that choice implies.
@@ -32,13 +33,13 @@ import * as utils from "./utils.ts";
 // natively from the process environment, so a credential never has to be
 // rendered into a .tf file sitting in the work directory in plaintext.
 // `network` is discovered: the region's default VPC, never one this package
-// owns. `digitalocean-ssh-keys` stays a required literal key; the SSH Keypair
-// Standard is a separate adoption.
+// owns. `digitalocean-ssh-keys` is deliberately absent from `required`: per the
+// SSH Keypair Standard its absence selects keygen mode, and its presence is the
+// opt-out that passes the operator's key ids through untouched.
 export const computeProviders: computeCluster.ClusterRegistry = {
   digitalocean: {
     required: ["digitalocean-name", "digitalocean-region", "digitalocean-size",
-               "digitalocean-image", "digitalocean-ssh-keys",
-               "digitalocean-ssh-private-key", "digitalocean-ssh-sources",
+               "digitalocean-image", "digitalocean-ssh-sources",
                "digitalocean-client-sources", "digitalocean-vpc-mode"],
     secrets: ["do-token"],
     tofuEnv: { "do-token": "DIGITALOCEAN_TOKEN" },
@@ -140,6 +141,13 @@ export const forbiddenVpcKeys = [
 export function placeholder(x: unknown): boolean {
   return x == null ||
     (typeof x === "string" && (!x.trim() || x.toUpperCase() === "REPLACE_ME"));
+}
+
+// Whether this deployment owns its machine keypair: `digitalocean-ssh-keys` is
+// absent. Delegates to ONCE, the standard's reference implementation, so one
+// rule decides it everywhere.
+export function keygen(opts: Opts): boolean {
+  return onceSsh.keygen(opts);
 }
 
 interface Entry { required?: string[]; secrets?: string[]; tofuEnv?: Record<string, string> }
@@ -269,6 +277,12 @@ export function stateErrors(opts: Opts): string[] {
 
   push(!(placeholder(opts.profile) || profileRe.test(String(opts.profile))),
        ":profile must be a safe 1-63 character name");
+
+  // Opt-out mode reaches the nodes with the operator's own key, so the path to
+  // it is desired state there; keygen mode names the generated key itself and
+  // must not be asked for one.
+  push(!keygen(opts) && placeholder(opts["digitalocean-ssh-private-key"]),
+       ":digitalocean-ssh-private-key is required when digitalocean-ssh-keys is supplied");
 
   push(opts["cluster-nodes"] !== utils.nodeCount,
        `:cluster-nodes must be ${utils.nodeCount}; the topology colocates a ` +

@@ -4,9 +4,9 @@ from pathlib import Path
 import pytest
 from blue.cli import par_name
 from blue.workflow import StepError
-from package_postgres_ha_blue import tools, workflow
+from package_postgres_ha_blue import ssh, tools, workflow
 
-from conftest import fixture
+from conftest import fixture, optout
 
 FIXTURE = fixture()
 
@@ -94,7 +94,25 @@ def test_delete_runs_the_same_edges_backwards_after_loading_state():
     assert walk("delete") == [
         "postgres-ha/start", "postgres-ha/load-infrastructure",
         "postgres-ha/cluster", "postgres-ha/ansible-local", "postgres-ha/dns",
-        "postgres-ha/infrastructure", "postgres-ha/generated-cleanup"]
+        "postgres-ha/infrastructure", "postgres-ha/ssh-cleanup", "postgres-ha/generated-cleanup"]
+    # The keypair goes after the compute destroy (ssh-keypair.md §3.3).
+    assert (workflow.wire_fn("postgres-ha/ssh-cleanup", {"blue/event": "delete"})
+            == (ssh.cleanup_step, "postgres-ha/generated-cleanup"))
+
+
+async def test_a_build_fills_the_placeholder_key_paths():
+    # Every event fills the machine-key paths in preflight so the templates
+    # and the inventory render the same whichever step scaffolds them; a build
+    # gets the fixed placeholder, never the operator's home.
+    r = await workflow.start_step(fixture({"blue/event": "build"}), {})
+    assert r["blue/exit"] == 0
+    assert r["ssh-private-key-path"] == "/home/build-placeholder/.ssh/postgres-ha-fixture"
+    assert r["ssh-keygen"] is True
+    # Opt-out invents no key path.
+    o = await workflow.start_step(optout({"blue/event": "build"}), {})
+    assert o["blue/exit"] == 0
+    assert "ssh-private-key-path" not in o
+    assert "ssh-keygen" not in o
 
 
 def test_build_follows_the_create_graph():

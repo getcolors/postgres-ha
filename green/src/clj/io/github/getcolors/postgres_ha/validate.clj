@@ -18,6 +18,7 @@
             [green.cli :as green-cli]
             [io.github.getcolors.once.compute :as compute]
             [io.github.getcolors.once.compute-cluster :as cluster]
+            [io.github.getcolors.once.ssh :as once-ssh]
             [io.github.getcolors.postgres-ha.utils :as utils]))
 
 (def compute-providers
@@ -28,12 +29,13 @@
   natively from the process environment, so a credential never has to be
   rendered into a .tf file sitting in the work directory in plaintext.
   `:network` is `:discovered`: the region's default VPC, never one this
-  package owns. `digitalocean-ssh-keys` stays a required literal key; the SSH
-  Keypair Standard is a separate adoption."
+  package owns. `digitalocean-ssh-keys` is deliberately absent from
+  `:required`: per the SSH Keypair Standard its absence selects keygen mode,
+  and its presence is the opt-out that passes the operator's key ids through
+  untouched."
   {"digitalocean"
    {:required [:digitalocean-name :digitalocean-region :digitalocean-size
-               :digitalocean-image :digitalocean-ssh-keys
-               :digitalocean-ssh-private-key :digitalocean-ssh-sources
+               :digitalocean-image :digitalocean-ssh-sources
                :digitalocean-client-sources :digitalocean-vpc-mode]
     :secrets [:do-token]
     :tofu-env {:do-token "DIGITALOCEAN_TOKEN"}
@@ -126,6 +128,13 @@
   (or (nil? x)
       (and (string? x)
            (or (str/blank? x) (= "REPLACE_ME" (str/upper-case x))))))
+
+(defn keygen?
+  "Whether this deployment owns its machine keypair: `digitalocean-ssh-keys`
+  is absent. Delegates to ONCE, the standard's reference implementation, so
+  one rule decides it everywhere."
+  [opts]
+  (once-ssh/keygen? opts))
 
 (defn entry [opts slot] (get-in providers [slot (get opts slot)]))
 (defn tofu-env [opts slot] (:tofu-env (entry opts slot) {}))
@@ -225,6 +234,12 @@
                   (re-matches profile-re (str (:profile opts))))
       [":profile must be a safe 1-63 character name"])
 
+    ;; Opt-out mode reaches the nodes with the operator's own key, so the path
+    ;; to it is desired state there; keygen mode names the generated key
+    ;; itself and must not be asked for one.
+    (when (and (not (keygen? opts))
+               (placeholder? (:digitalocean-ssh-private-key opts)))
+      [":digitalocean-ssh-private-key is required when digitalocean-ssh-keys is supplied"])
     (when-not (= utils/node-count (:cluster-nodes opts))
       [(str ":cluster-nodes must be " utils/node-count
             "; the topology colocates a quorum store on the database nodes and "

@@ -4,12 +4,16 @@
  {test {:doc "Run the Babashka unit suite"
         :requires ([clojure.test :as t]
                    [io.github.getcolors.postgres-ha.validate-test]
+                   [io.github.getcolors.postgres-ha.ssh-test]
+                   [io.github.getcolors.postgres-ha.ssh-config-test]
                    [io.github.getcolors.postgres-ha.utils-test]
                    [io.github.getcolors.postgres-ha.tools-test]
                    [io.github.getcolors.postgres-ha.operator-test]
                    [io.github.getcolors.postgres-ha.workflow-test])
         :task (let [{:keys [fail error]}
                     (t/run-tests 'io.github.getcolors.postgres-ha.validate-test
+                                 'io.github.getcolors.postgres-ha.ssh-test
+                                 'io.github.getcolors.postgres-ha.ssh-config-test
                                  'io.github.getcolors.postgres-ha.utils-test
                                  'io.github.getcolors.postgres-ha.tools-test
                                  'io.github.getcolors.postgres-ha.operator-test

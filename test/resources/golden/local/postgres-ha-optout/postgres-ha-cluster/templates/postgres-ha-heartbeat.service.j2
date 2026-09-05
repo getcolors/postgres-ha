@@ -1,0 +1,11 @@
+[Unit]
+Description=Archive-continuity heartbeat for postgres-ha-fixture
+After=patroni.service
+Requires=patroni.service
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+ExecStart=/usr/local/bin/postgres-ha-heartbeat
+TimeoutStartSec=60

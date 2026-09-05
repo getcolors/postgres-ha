@@ -155,8 +155,8 @@ healthy cluster and stops meaning anything.
 | `digitalocean-name` | droplet name prefix; nodes are `<name>-1..3` |
 | `digitalocean-region` | region; also selects the default VPC |
 | `digitalocean-size` / `-image` | droplet size and image |
-| `digitalocean-ssh-keys` | IDs or fingerprints **already registered** on the account |
-| `digitalocean-ssh-private-key` | the matching private key, for Ansible and the operator verbs |
+| `digitalocean-ssh-keys` | **optional** — leave it out and the deployment owns its keypair: `create` generates `~/.ssh/<profile>`, registers its public half at DigitalOcean under the profile's name, and `delete` removes both last (the workspace SSH Keypair Standard). Supply IDs or fingerprints **already registered** on the account to opt out; nothing is then generated or uploaded. |
+| `digitalocean-ssh-private-key` | opt-out mode only: the private half of `digitalocean-ssh-keys` on this machine, for Ansible and the operator verbs. Refused as a requirement in keygen mode, where the generated key is used. |
 | `digitalocean-ssh-sources` | CIDRs allowed to reach port 22 |
 | `digitalocean-client-sources` | CIDRs allowed to reach the endpoint ports |
 | `digitalocean-vpc-mode` | must be `default` |

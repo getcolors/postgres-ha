@@ -28,6 +28,10 @@
 
 (def converged (assoc fixture :once/cluster recorded))
 
+(def optout
+  (let [file (io/file "test/fixtures/optout.yml")]
+    (green-cli/read-state file (slurp file))))
+
 (deftest stage-directories-and-state-keys-are-the-deployment-identity
   (testing "these two strings address live infrastructure; moving either
             orphans a cluster, so they are asserted rather than derived at
@@ -201,10 +205,12 @@
             {:name "postgres-ha-fixture-2" :ip "203.0.113.3"}]
            (:ssh_hosts vars)))
     (is (= "present" (:block_state vars)))
-    (is (= "~/.ssh/id_ed25519" (:ssh_private_key vars)))
-    (testing "the pre-standard per-node blocks are named so the play can remove them"
-      (is (= ["postgres-ha-fixture-1" "postgres-ha-fixture-2" "postgres-ha-fixture-3"]
-             (:legacy_aliases vars)))))
+    (testing "the identity file is desired state a build knows and reaches the play through Selmer, in keygen mode only"
+      (is (= [:block_state :host_alias :ssh_hosts] (sort (keys vars))))
+      (let [data (:data (first (tools/ansible-local-specs fixture)))]
+        (is (true? (:ssh-keygen data)))
+        (is (= "~/.ssh/postgres-ha-fixture" (:ssh-config-identity-file data))))
+      (is (false? (:ssh-keygen (:data (first (tools/ansible-local-specs optout))))))))
   (is (= "absent" (:block_state (tools/ansible-local-extra-vars (assoc fixture :green/event :delete)))))
   (testing "a build renders the play without an address"
     (let [rendered (slurp (io/resource "io/github/getcolors/postgres-ha/tools/ansible-local/main.yml"))]
@@ -224,15 +230,22 @@
         (is (some? (:private_ip host)))
         (is (some? (:ansible_host host)))
         (is (= "root" (:ansible_user host)))))
-    (is (= "~/.ssh/id_ed25519"
-           (get-in inv [:all :children :postgres :vars :ansible_ssh_private_key_file])))))
+    (testing "the nodes are reached with the generated key in keygen mode, on a build through the placeholder, and with the operator's own key in opt-out mode"
+      (is (= "/home/build-placeholder/.ssh/postgres-ha-fixture"
+             (get-in (json/parse-string (tools/inventory (assoc converged :green/event :build)) true)
+                     [:all :children :postgres :vars :ansible_ssh_private_key_file])))
+      (is (= "~/.ssh/id_ed25519"
+             (get-in (json/parse-string (tools/inventory optout) true)
+                     [:all :children :postgres :vars :ansible_ssh_private_key_file]))))))
 
 (deftest the-hcl-lists-are-quoted-not-interpolated
   (let [data (tools/infrastructure-data fixture)]
     (is (= "[\"postgres-ha-fixture-1\", \"postgres-ha-fixture-2\", \"postgres-ha-fixture-3\"]"
            (:node-names-hcl data)))
     (is (= "[\"203.0.113.10/32\"]" (:ssh-sources-hcl data)))
-    (is (= "[\"12345678\"]" (:ssh-keys-hcl data)))
+    (is (= "[]" (:ssh-keys-hcl data))
+        "keygen mode references the key resource; the literal list is not rendered")
+    (is (= "[\"12345678\"]" (:ssh-keys-hcl (tools/infrastructure-data optout))))
     (testing "an overlay string renders the same list"
       (is (= "[\"203.0.113.10/32\", \"198.51.100.0/24\"]"
              (:client-sources-hcl (tools/infrastructure-data

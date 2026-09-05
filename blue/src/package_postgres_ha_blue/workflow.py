@@ -21,10 +21,10 @@ import os
 from blue import dry_run, progress
 from blue.cli import par_name, read_pars
 from blue.lifecycle import preflight
-from blue.workflow import advice_add, workflow
+from blue.workflow import advice_add, failed, workflow
 from package_once_blue import compute_cluster as cluster
 
-from . import tools, validate
+from . import ssh, ssh_config, tools, validate
 
 DEFAULTS = {
     "provider-compute": validate.default_compute_provider,
@@ -89,11 +89,28 @@ async def start_step(original: dict, env: dict | None = None, reader=None) -> di
             and not validate.state_errors(overlaid)):
         state = await cluster.read_state(overlaid, reader)
 
-    def after(opts, _env, ctx):
-        result = {**opts, "blue/exit": 0}
-        if _real_lifecycle_event(ctx):
-            result["postgres-ha/state"] = state
-        return result
+    # The machine key's create matrix and the DigitalOcean preflight run
+    # before any template is rendered: an unowned key on disk or at the
+    # provider stops the run while stopping is still free. Every other event
+    # fills the same template values — a destroy renders before it destroys —
+    # but checks no key, because the delete's key cleanup runs after the
+    # compute destroy.
+    async def after(opts, _env, ctx):
+        handed = {**opts, "postgres-ha/state": state} if _real_lifecycle_event(ctx) else opts
+        if ctx["real"] and ctx["event"] == "create":
+            async def recorded(_opts):
+                return state.get("params")
+            handed = await ssh.ensure_key(handed, recorded)
+            if failed(handed):
+                return handed
+            handed = ssh.preflight(ssh.with_machine_key(handed))
+            if failed(handed):
+                return handed
+            handed = ssh_config.preflight(handed)
+            if failed(handed):
+                return handed
+            return {**handed, "blue/exit": 0}
+        return {**ssh.with_machine_key(handed), "blue/exit": 0}
 
     return await preflight(
         original, defaults=DEFAULTS, overlay=read_pars, env=environment,
@@ -123,8 +140,11 @@ def wire_fn(step: str, run_opts: dict):
             "postgres-ha/cluster": (tools.cluster_step, "postgres-ha/ansible-local"),
             "postgres-ha/ansible-local": (tools.ansible_local_step, "postgres-ha/dns"),
             "postgres-ha/dns": (tools.dns_step, "postgres-ha/infrastructure"),
-            "postgres-ha/infrastructure": (tools.infrastructure_step,
-                                           "postgres-ha/generated-cleanup"),
+            # The keypair goes after the compute destroy (ssh-keypair.md
+            # §3.3): a key that predeceases its hosts locks the operator out
+            # of nodes that still exist.
+            "postgres-ha/infrastructure": (tools.infrastructure_step, "postgres-ha/ssh-cleanup"),
+            "postgres-ha/ssh-cleanup": (ssh.cleanup_step, "postgres-ha/generated-cleanup"),
             "postgres-ha/generated-cleanup": (tools.generated_cleanup_step,),
         }.get(step)
     return {
@@ -147,7 +167,7 @@ def backend_advice(tool: str):
 side_effecting_steps = [
     "postgres-ha/load-infrastructure", "postgres-ha/infrastructure",
     "postgres-ha/dns", "postgres-ha/ansible-local", "postgres-ha/cluster",
-    "postgres-ha/acceptance", "postgres-ha/generated-cleanup",
+    "postgres-ha/acceptance", "postgres-ha/ssh-cleanup", "postgres-ha/generated-cleanup",
 ]
 
 

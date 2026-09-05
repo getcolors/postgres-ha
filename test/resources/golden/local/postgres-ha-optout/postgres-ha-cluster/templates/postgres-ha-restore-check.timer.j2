@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily verified restore of postgres-ha-fixture
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=postgres-ha-restore-check.service
+
+[Install]
+WantedBy=timers.target

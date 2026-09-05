@@ -4,11 +4,16 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [green.cli :as green-cli]
+            [io.github.getcolors.postgres-ha.ssh :as ssh]
             [io.github.getcolors.postgres-ha.tools :as tools]
             [io.github.getcolors.postgres-ha.workflow :as workflow]))
 
 (def fixture
   (let [file (io/file "test/fixtures/colors.yml")]
+    (green-cli/read-state file (slurp file))))
+
+(def optout
+  (let [file (io/file "test/fixtures/optout.yml")]
     (green-cli/read-state file (slurp file))))
 
 (def credentials
@@ -73,8 +78,25 @@
             remote state before anything is destroyed"
     (is (= [:postgres-ha/start :postgres-ha/load-infrastructure
             :postgres-ha/cluster :postgres-ha/ansible-local :postgres-ha/dns
-            :postgres-ha/infrastructure :postgres-ha/generated-cleanup]
-           (walk :delete)))))
+            :postgres-ha/infrastructure :postgres-ha/ssh-cleanup :postgres-ha/generated-cleanup]
+           (walk :delete))))
+  (testing "the keypair goes after the compute destroy (ssh-keypair.md §3.3)"
+    (is (= [ssh/cleanup-step :postgres-ha/generated-cleanup]
+           (workflow/wire-fn :postgres-ha/ssh-cleanup {:green/event :delete})))))
+
+(deftest a-build-fills-the-placeholder-key-paths
+  ;; Every event fills the machine-key paths in preflight so the templates and
+  ;; the inventory render the same whichever step scaffolds them; a build gets
+  ;; the fixed placeholder, never the operator's home.
+  (let [r (workflow/start-step (assoc fixture :green/event :build) {})]
+    (is (= 0 (:green/exit r)))
+    (is (= "/home/build-placeholder/.ssh/postgres-ha-fixture" (:ssh-private-key-path r)))
+    (is (true? (:ssh-keygen r))))
+  (testing "opt-out invents no key path"
+    (let [r (workflow/start-step (assoc optout :green/event :build) {})]
+      (is (= 0 (:green/exit r)))
+      (is (nil? (:ssh-private-key-path r)))
+      (is (nil? (:ssh-keygen r))))))
 
 (deftest build-follows-the-create-graph
   (is (= (walk :create) (walk :build))))

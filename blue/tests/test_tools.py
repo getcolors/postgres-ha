@@ -6,7 +6,7 @@ from blue.workflow import StepError
 from package_once_blue import compute_cluster as cluster
 from package_postgres_ha_blue import tools, validate
 
-from conftest import fixture
+from conftest import fixture, optout
 
 FIXTURE = fixture()
 
@@ -225,10 +225,13 @@ def test_the_local_play_receives_one_block_of_aliases():
         {"name": "postgres-ha-fixture-2", "ip": "203.0.113.3"},
     ]
     assert variables["block_state"] == "present"
-    assert variables["ssh_private_key"] == "~/.ssh/id_ed25519"
-    # the pre-standard per-node blocks are named so the play can remove them
-    assert variables["legacy_aliases"] == \
-        ["postgres-ha-fixture-1", "postgres-ha-fixture-2", "postgres-ha-fixture-3"]
+    # The identity file is desired state a build knows and reaches the play
+    # through Selmer, in keygen mode only.
+    assert sorted(variables) == ["block_state", "host_alias", "ssh_hosts"]
+    data = tools.ansible_local_specs(fixture())[0]["data"]
+    assert data["ssh-keygen"] is True
+    assert data["ssh-config-identity-file"] == "~/.ssh/postgres-ha-fixture"
+    assert tools.ansible_local_specs(optout())[0]["data"]["ssh-keygen"] is False
     assert tools.ansible_local_extra_vars(fixture({"blue/event": "delete"}))["block_state"] == "absent"
     # a build renders the play without an address
     rendered = (Path(tools.ROOT) / "tools/ansible-local/main.yml").read_text()
@@ -249,7 +252,13 @@ def test_the_inventory_carries_exactly_what_the_templates_read():
         assert host["private_ip"] is not None
         assert host["ansible_host"] is not None
         assert host["ansible_user"] == "root"
-    assert inv["all"]["children"]["postgres"]["vars"]["ansible_ssh_private_key_file"] == \
+    # The nodes are reached with the generated key in keygen mode, on a build
+    # through the placeholder, and with the operator's own key in opt-out mode.
+    built = json.loads(tools.inventory({**converged(), "blue/event": "build"}))
+    assert built["all"]["children"]["postgres"]["vars"]["ansible_ssh_private_key_file"] == \
+        "/home/build-placeholder/.ssh/postgres-ha-fixture"
+    opted_out = json.loads(tools.inventory(optout()))
+    assert opted_out["all"]["children"]["postgres"]["vars"]["ansible_ssh_private_key_file"] == \
         "~/.ssh/id_ed25519"
 
 
@@ -258,7 +267,9 @@ def test_the_hcl_lists_are_quoted_not_interpolated():
     assert data["node-names-hcl"] == \
         '["postgres-ha-fixture-1", "postgres-ha-fixture-2", "postgres-ha-fixture-3"]'
     assert data["ssh-sources-hcl"] == '["203.0.113.10/32"]'
-    assert data["ssh-keys-hcl"] == '["12345678"]'
+    # keygen mode references the key resource; the literal list is not rendered
+    assert data["ssh-keys-hcl"] == "[]"
+    assert tools.infrastructure_data(optout())["ssh-keys-hcl"] == '["12345678"]'
     # an overlay string renders the same list
     assert tools.infrastructure_data(
         fixture({"digitalocean-client-sources": "203.0.113.10/32, 198.51.100.0/24"}))["client-sources-hcl"] == \

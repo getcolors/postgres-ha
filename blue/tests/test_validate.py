@@ -4,7 +4,7 @@ from blue.cli import par_name
 from package_once_blue import compute_cluster as cluster
 from package_postgres_ha_blue import validate
 
-from conftest import fixture
+from conftest import fixture, optout
 
 FIXTURE = fixture()
 
@@ -15,6 +15,25 @@ def errors(overrides: dict) -> list[str]:
 
 def has(messages, pattern: str) -> bool:
     return any(re.search(pattern, m) for m in messages)
+
+
+def test_both_keypair_modes_are_renderable():
+    # The SSH Keypair Standard has two modes and conformance means both hold.
+    assert validate.state_errors(optout()) == []
+    assert validate.keygen(FIXTURE)
+    assert not validate.keygen(optout())
+    # The machine key is never required: its absence is keygen mode.
+    assert not any("digitalocean-ssh-keys" in e for e in validate.state_errors(FIXTURE))
+
+
+def test_the_private_key_path_is_desired_state_in_opt_out_mode_only():
+    o = optout()
+    del o["digitalocean-ssh-private-key"]
+    assert ":digitalocean-ssh-private-key is required when digitalocean-ssh-keys is supplied" \
+        in validate.state_errors(o)
+    k = fixture()
+    k.pop("digitalocean-ssh-private-key", None)
+    assert validate.state_errors(k) == []
 
 
 def test_the_fixture_is_renderable():

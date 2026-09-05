@@ -20,6 +20,24 @@
   (is (= [] (validate/state-errors fixture))
       "the golden fixture must stay valid, or the golden proves nothing"))
 
+(def optout
+  (let [file (io/file "test/fixtures/optout.yml")]
+    (green-cli/read-state file (slurp file))))
+
+(deftest both-keypair-modes-are-renderable
+  ;; The SSH Keypair Standard has two modes and conformance means both hold.
+  (is (= [] (validate/state-errors optout)))
+  (is (validate/keygen? fixture))
+  (is (not (validate/keygen? optout)))
+  (testing "the machine key is never required: its absence is keygen mode"
+    (is (not (has? (validate/state-errors fixture) #"digitalocean-ssh-keys")))))
+
+(deftest the-private-key-path-is-desired-state-in-opt-out-mode-only
+  (is (has? (validate/state-errors (dissoc optout :digitalocean-ssh-private-key))
+            #"digitalocean-ssh-private-key is required when digitalocean-ssh-keys is supplied"))
+  (testing "keygen mode names the generated key itself and asks for no path"
+    (is (= [] (validate/state-errors (dissoc fixture :digitalocean-ssh-private-key))))))
+
 (deftest every-problem-is-reported-at-once
   (testing "a person fixing desired state one error per run gives up on it"
     (let [messages (errors {:cluster-host nil :postgres-database "Not An Ident"

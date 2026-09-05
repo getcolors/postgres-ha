@@ -1,0 +1,67 @@
+# HAProxy — the client endpoint.
+#
+# Identical on all three nodes. Each one forwards to whichever member currently
+# holds the leader lock, decided by Patroni's own REST API rather than by any
+# opinion of HAProxy's: `/primary` answers 200 on exactly one node at a time,
+# and `/replica` answers 200 only on a streaming standby. A promotion changes
+# those answers within one health-check interval, and no configuration is
+# rewritten and no API is called.
+#
+# The listeners bind the node's public address and loopback. PostgreSQL binds
+# the private VPC address, so port 5432 is free here and
+# clients get the standard port on the name they were given.
+
+global
+    log /dev/log local0
+    maxconn 2000
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log     global
+    mode    tcp
+    retries 2
+    option  dontlognull
+    timeout client  30m
+    timeout server  30m
+    timeout connect 5s
+    timeout check   5s
+    timeout queue   30s
+
+# Loopback only: this is for `green status`-adjacent debugging on the node, not
+# a surface for anyone else.
+listen stats
+    mode http
+    bind 127.0.0.1:7000
+    stats enable
+    stats uri /
+    stats refresh 5s
+
+# Read-write. Exactly one backend can be up at a time, because exactly one node
+# answers 200 on /primary.
+listen primary
+    bind {{ ansible_host }}:5432
+    bind 127.0.0.1:5432
+    option httpchk GET /primary
+    http-check expect status 200
+    # `on-marked-down shutdown-sessions` is what makes a failover visible to
+    # clients instead of leaving them holding a socket to a demoted primary
+    # that will refuse every write.
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+{% for host in groups['postgres'] | sort %}
+    server {{ host }} {{ hostvars[host].private_ip }}:5432 maxconn 200 check port 8008
+{% endfor %}
+
+# Read-only. Both standbys are up here, round-robin; the leader is not, so a
+# read-only client never lands on the primary and adds load to it.
+listen replica
+    bind {{ ansible_host }}:5433
+    bind 127.0.0.1:5433
+    option httpchk GET /replica
+    http-check expect status 200
+    balance roundrobin
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+{% for host in groups['postgres'] | sort %}
+    server {{ host }} {{ hostvars[host].private_ip }}:5432 maxconn 200 check port 8008
+{% endfor %}

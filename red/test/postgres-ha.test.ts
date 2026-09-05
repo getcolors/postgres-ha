@@ -9,6 +9,8 @@ import { parName } from "red/cli";
 import { StepError, type Opts } from "red/workflow";
 import { computeCluster } from "package-once-red";
 import * as operator from "../src/operator.ts";
+import * as ssh from "../src/ssh.ts";
+import * as sshConfig from "../src/ssh-config.ts";
 import * as tools from "../src/tools.ts";
 import * as utils from "../src/utils.ts";
 import * as validate from "../src/validate.ts";
@@ -16,6 +18,8 @@ import * as workflow from "../src/workflow.ts";
 
 const fixtureFile = join(import.meta.dir, "../../test/fixtures/colors.yml");
 const fixture = Bun.YAML.parse(readFileSync(fixtureFile, "utf8")) as Opts;
+const optoutFile = join(import.meta.dir, "../../test/fixtures/optout.yml");
+const optout = Bun.YAML.parse(readFileSync(optoutFile, "utf8")) as Opts;
 
 // --- utils -------------------------------------------------------------------
 
@@ -70,6 +74,23 @@ describe("validate", () => {
   test("the fixture is renderable", () => {
     // the golden fixture must stay valid, or the golden proves nothing
     expect(validate.stateErrors(fixture)).toEqual([]);
+  });
+
+  test("both keypair modes are renderable", () => {
+    // The SSH Keypair Standard has two modes and conformance means both hold.
+    expect(validate.stateErrors(optout)).toEqual([]);
+    expect(validate.keygen(fixture)).toBe(true);
+    expect(validate.keygen(optout)).toBe(false);
+    // The machine key is never required: its absence is keygen mode.
+    expect(validate.stateErrors(fixture).some((e) => e.includes("digitalocean-ssh-keys"))).toBe(false);
+  });
+
+  test("the private key path is desired state in opt-out mode only", () => {
+    const { "digitalocean-ssh-private-key": _o, ...withoutPath } = optout;
+    expect(validate.stateErrors(withoutPath))
+      .toContain(":digitalocean-ssh-private-key is required when digitalocean-ssh-keys is supplied");
+    const { "digitalocean-ssh-private-key": _k, ...keygenWithoutPath } = fixture;
+    expect(validate.stateErrors(keygenWithoutPath)).toEqual([]);
   });
 
   test("every problem is reported at once", () => {
@@ -464,9 +485,13 @@ describe("tools", () => {
       { name: "postgres-ha-fixture-2", ip: "203.0.113.3" },
     ]);
     expect(vars.block_state).toBe("present");
-    expect(vars.ssh_private_key).toBe("~/.ssh/id_ed25519");
-    // the pre-standard per-node blocks are named so the play can remove them
-    expect(vars.legacy_aliases).toEqual(["postgres-ha-fixture-1", "postgres-ha-fixture-2", "postgres-ha-fixture-3"]);
+    // The identity file is desired state a build knows and reaches the play
+    // through Selmer, in keygen mode only.
+    expect(Object.keys(vars).sort()).toEqual(["block_state", "host_alias", "ssh_hosts"]);
+    const data = tools.ansibleLocalSpecs(fixture)[0]!.data as Opts;
+    expect(data["ssh-keygen"]).toBe(true);
+    expect(data["ssh-config-identity-file"]).toBe("~/.ssh/postgres-ha-fixture");
+    expect((tools.ansibleLocalSpecs(optout)[0]!.data as Opts)["ssh-keygen"]).toBe(false);
     expect(tools.ansibleLocalExtraVars({ ...fixture, "red/event": "delete" }).block_state).toBe("absent");
     // a build renders the play without an address
     const rendered = readFileSync(join(import.meta.dir, "../resources/tools/ansible-local/main.yml"), "utf8");
@@ -488,7 +513,11 @@ describe("tools", () => {
       expect(host.ansible_host).toBeDefined();
       expect(host.ansible_user).toBe("root");
     }
-    expect(inv.all.children.postgres.vars.ansible_ssh_private_key_file)
+    // The nodes are reached with the generated key in keygen mode, on a build
+    // through the placeholder, and with the operator's own key in opt-out mode.
+    expect(JSON.parse(tools.inventory({ ...converged(), "red/event": "build" })).all.children.postgres.vars.ansible_ssh_private_key_file)
+      .toBe("/home/build-placeholder/.ssh/postgres-ha-fixture");
+    expect(JSON.parse(tools.inventory(optout)).all.children.postgres.vars.ansible_ssh_private_key_file)
       .toBe("~/.ssh/id_ed25519");
   });
 
@@ -497,7 +526,9 @@ describe("tools", () => {
     expect(data["node-names-hcl"])
       .toBe('["postgres-ha-fixture-1", "postgres-ha-fixture-2", "postgres-ha-fixture-3"]');
     expect(data["ssh-sources-hcl"]).toBe('["203.0.113.10/32"]');
-    expect(data["ssh-keys-hcl"]).toBe('["12345678"]');
+    // keygen mode references the key resource; the literal list is not rendered
+    expect(data["ssh-keys-hcl"]).toBe("[]");
+    expect(tools.infrastructureData(optout)["ssh-keys-hcl"]).toBe('["12345678"]');
     // an overlay string renders the same list
     expect(tools.infrastructureData({ ...fixture, "digitalocean-client-sources": "203.0.113.10/32, 198.51.100.0/24" })["client-sources-hcl"])
       .toBe('["203.0.113.10/32", "198.51.100.0/24"]');
@@ -726,8 +757,26 @@ describe("workflow", () => {
     expect(walk("delete")).toEqual([
       "postgres-ha/start", "postgres-ha/load-infrastructure",
       "postgres-ha/cluster", "postgres-ha/ansible-local", "postgres-ha/dns",
-      "postgres-ha/infrastructure", "postgres-ha/generated-cleanup",
+      "postgres-ha/infrastructure", "postgres-ha/ssh-cleanup", "postgres-ha/generated-cleanup",
     ]);
+    // The keypair goes after the compute destroy (ssh-keypair.md §3.3).
+    expect(workflow.wireFn("postgres-ha/ssh-cleanup", { "red/event": "delete" }))
+      .toEqual([ssh.cleanupStep, "postgres-ha/generated-cleanup"]);
+  });
+
+  test("a build fills the placeholder key paths", async () => {
+    // Every event fills the machine-key paths in preflight so the templates
+    // and the inventory render the same whichever step scaffolds them; a build
+    // gets the fixed placeholder, never the operator's home.
+    const r = await workflow.startStep({ ...fixture, "red/event": "build" }, {});
+    expect(r["red/exit"]).toBe(0);
+    expect(r["ssh-private-key-path"]).toBe("/home/build-placeholder/.ssh/postgres-ha-fixture");
+    expect(r["ssh-keygen"]).toBe(true);
+    // Opt-out invents no key path.
+    const o = await workflow.startStep({ ...optout, "red/event": "build" }, {});
+    expect(o["red/exit"]).toBe(0);
+    expect(o["ssh-private-key-path"]).toBeUndefined();
+    expect(o["ssh-keygen"]).toBeUndefined();
   });
 
   test("build follows the create graph", () => {
@@ -933,5 +982,107 @@ describe("workflow", () => {
     const loaded = await tools.loadInfrastructureStep(r);
     expect(loaded["red/exit"]).toBe(1);
     expect(loaded["red/err"]).toBe("the compute stage did not report nodes this package declares: 2");
+  });
+});
+
+// --- the machine keypair -----------------------------------------------------
+
+describe("ssh", () => {
+  test("a build never names the operator's home", () => {
+    // Committed goldens must mean the same thing on every workstation, so a
+    // build renders a fixed placeholder rather than reading ~/.ssh.
+    const opts = ssh.withMachineKey({ ...fixture, "red/event": "build" });
+    expect(opts["ssh-private-key-path"]).toBe("/home/build-placeholder/.ssh/postgres-ha-fixture");
+    expect(opts["ssh-public-key-path"]).toBe("/home/build-placeholder/.ssh/postgres-ha-fixture.pub");
+    // The placeholder lands on the provider's own machine-key key.
+    expect(opts["digitalocean-ssh-keys"]).toBe("/home/build-placeholder/.ssh/postgres-ha-fixture.pub");
+    expect(String(process.env.HOME)).not.toContain("build-placeholder");
+  });
+
+  test("a dry-run is held to the same rule as a build", () => {
+    expect(ssh.renderedOnly({ "red/event": "build" })).toBe(true);
+    expect(ssh.renderedOnly({ "red/event": "create", "red/dry-run": true })).toBe(true);
+    expect(ssh.renderedOnly({ "red/event": "create" })).toBe(false);
+    expect(ssh.withMachineKey({ ...fixture, "red/event": "create", "red/dry-run": true })["ssh-private-key-path"])
+      .toBe("/home/build-placeholder/.ssh/postgres-ha-fixture");
+  });
+
+  test("real events render the real path", () => {
+    const opts = ssh.withMachineKey({ ...fixture, "red/event": "create" });
+    expect(String(opts["ssh-private-key-path"])).not.toContain("build-placeholder");
+    expect(String(opts["ssh-private-key-path"]).endsWith("/.ssh/postgres-ha-fixture")).toBe(true);
+  });
+
+  test("opt-out opts pass through untouched", () => {
+    const opts = { ...optout, "red/event": "build" };
+    expect(ssh.withMachineKey(opts)).toEqual(opts);
+    expect(ssh.withMachineKey(opts)["ssh-private-key-path"]).toBeUndefined();
+  });
+});
+
+// --- ~/.ssh/config -----------------------------------------------------------
+
+describe("ssh-config", () => {
+  const opts = { ...fixture, profile: "postgres-ha-digitalocean" };
+
+  test("the deployment claims one alias per node and the bare profile", () => {
+    expect(sshConfig.aliases(opts)).toEqual(
+      ["postgres-ha-digitalocean", "postgres-ha-digitalocean-0", "postgres-ha-digitalocean-1", "postgres-ha-digitalocean-2"]);
+  });
+
+  test("the identity file stays unexpanded", () => {
+    expect(sshConfig.identityFile(opts)).toBe("~/.ssh/postgres-ha-digitalocean");
+  });
+
+  test("a foreign stanza is found for any alias, not just the first", () => {
+    const lines = "Host something\n  HostName 1.2.3.4\n\nHost postgres-ha-digitalocean-2\n  HostName 5.6.7.8\n"
+      .split("\n");
+    expect(sshConfig.foreignStanzaLine(lines, "postgres-ha-digitalocean")).toBeUndefined();
+    expect(sshConfig.foreignStanzaLine(lines, "postgres-ha-digitalocean-2")).toBe(4);
+  });
+
+  test("our own managed block is not foreign for any alias in it", () => {
+    const lines = [
+      "# BEGIN postgres-ha-digitalocean ANSIBLE MANAGED BLOCK",
+      "Host postgres-ha-digitalocean", "  HostName 1.2.3.4",
+      "Host postgres-ha-digitalocean-0", "  HostName 1.2.3.4",
+      "Host postgres-ha-digitalocean-1", "  HostName 1.2.3.5",
+      "Host postgres-ha-digitalocean-2", "  HostName 1.2.3.6",
+      "# END postgres-ha-digitalocean ANSIBLE MANAGED BLOCK",
+    ];
+    for (const alias of sshConfig.aliases(opts)) {
+      expect(sshConfig.foreignStanzaLine(lines, alias, "postgres-ha-digitalocean")).toBeUndefined();
+    }
+  });
+
+  test("a node stanza outside our block is still foreign", () => {
+    const lines = [
+      "# BEGIN postgres-ha-digitalocean ANSIBLE MANAGED BLOCK",
+      "Host postgres-ha-digitalocean", "  HostName 1.2.3.4",
+      "# END postgres-ha-digitalocean ANSIBLE MANAGED BLOCK",
+      "Host postgres-ha-digitalocean-1", "  HostName 9.9.9.9",
+    ];
+    expect(sshConfig.foreignStanzaLine(lines, "postgres-ha-digitalocean-1", "postgres-ha-digitalocean")).toBe(5);
+  });
+
+  test("a global option above the first Host blocks the run", () => {
+    expect(sshConfig.leadingOptionLine(["ServerAliveInterval 60", "Host x"])).toBe(1);
+    expect(sshConfig.leadingOptionLine(["# a comment", "", "Host x", "  User root"]))
+      .toBeUndefined();
+    expect(sshConfig.leadingOptionLine(["Host x", "  ServerAliveInterval 60"])).toBeUndefined();
+  });
+
+  test("the refusal is reported as a failed step", () => {
+    const refused = sshConfig.preflight(opts, {
+      adoptError: () => "no",
+      placementError: () => undefined,
+    });
+    expect(refused["red/exit"]).toBe(1);
+    expect(refused["red/err"]).toBe("no");
+    const passed = sshConfig.preflight(opts, {
+      adoptError: () => undefined,
+      placementError: () => undefined,
+    });
+    expect(passed["red/exit"]).toBeUndefined();
   });
 });

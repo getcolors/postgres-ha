@@ -15,7 +15,7 @@ provider "digitalocean" {}
 locals {
   name           = "postgres-ha-fixture"
   node_names     = ["postgres-ha-fixture-1", "postgres-ha-fixture-2", "postgres-ha-fixture-3"]
-  ssh_keys       = ["12345678"]
+  ssh_keys       = [digitalocean_ssh_key.machine.id]
   ssh_sources    = ["203.0.113.10/32"]
   client_sources = ["203.0.113.10/32"]
 }
@@ -26,6 +26,17 @@ locals {
 # deployment's private network.
 data "digitalocean_vpc" "default" {
   region = "ams3"
+}
+
+# Keygen mode (workspace standards/ssh-keypair.md): the account key is named
+# after the profile and lives in this stack's state, which is what makes its
+# ownership decidable. One key for the cluster, not one per node — the
+# deployment is one thing, and a key per machine would multiply what the
+# standard exists to make singular. Never reference a literal key id here in
+# keygen mode.
+resource "digitalocean_ssh_key" "machine" {
+  name       = "postgres-ha-fixture"
+  public_key = trimspace(file("/home/build-placeholder/.ssh/postgres-ha-fixture.pub"))
 }
 
 # One resource with a count rather than three addressed resources: the nodes
@@ -136,6 +147,7 @@ output "node_private_ips" {
 output "params" {
   value = {
     provider     = "digitalocean"
+    ssh_key_id   = digitalocean_ssh_key.machine.id
     vpc_id       = data.digitalocean_vpc.default.id
     vpc_ip_range = data.digitalocean_vpc.default.ip_range
     nodes = [for i, d in digitalocean_droplet.node : {

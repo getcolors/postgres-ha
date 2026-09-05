@@ -27,6 +27,7 @@ import re
 from blue.cli import par_name
 from package_once_blue import compute as once_compute
 from package_once_blue import compute_cluster as cluster
+from package_once_blue import ssh as once_ssh
 
 from . import utils
 
@@ -37,13 +38,13 @@ from . import utils
 # natively from the process environment, so a credential never has to be
 # rendered into a .tf file sitting in the work directory in plaintext.
 # `network` is discovered: the region's default VPC, never one this package
-# owns. `digitalocean-ssh-keys` stays a required literal key; the SSH Keypair
-# Standard is a separate adoption.
+# owns. `digitalocean-ssh-keys` is deliberately absent from `required`: per the
+# SSH Keypair Standard its absence selects keygen mode, and its presence is the
+# opt-out that passes the operator's key ids through untouched.
 compute_providers = {
     "digitalocean": {
         "required": ["digitalocean-name", "digitalocean-region", "digitalocean-size",
-                     "digitalocean-image", "digitalocean-ssh-keys",
-                     "digitalocean-ssh-private-key", "digitalocean-ssh-sources",
+                     "digitalocean-image", "digitalocean-ssh-sources",
                      "digitalocean-client-sources", "digitalocean-vpc-mode"],
         "secrets": ["do-token"],
         "tofu-env": {"do-token": "DIGITALOCEAN_TOKEN"},
@@ -146,6 +147,13 @@ forbidden_vpc_keys = [
 
 def placeholder(x) -> bool:
     return x is None or (isinstance(x, str) and (not x.strip() or x.upper() == "REPLACE_ME"))
+
+
+def keygen(opts: dict) -> bool:
+    """Whether this deployment owns its machine keypair: `digitalocean-ssh-keys`
+    is absent. Delegates to ONCE, the standard's reference implementation, so
+    one rule decides it everywhere."""
+    return once_ssh.keygen(opts)
 
 
 def entry(opts: dict, slot: str):
@@ -277,6 +285,12 @@ def state_errors(opts: dict) -> list[str]:
     push(not (placeholder(opts.get("profile"))
               or _PROFILE_RE.fullmatch(str(opts.get("profile")))),
          ":profile must be a safe 1-63 character name")
+
+    # Opt-out mode reaches the nodes with the operator's own key, so the path
+    # to it is desired state there; keygen mode names the generated key itself
+    # and must not be asked for one.
+    push(not keygen(opts) and placeholder(opts.get("digitalocean-ssh-private-key")),
+         ":digitalocean-ssh-private-key is required when digitalocean-ssh-keys is supplied")
 
     push(opts.get("cluster-nodes") != utils.NODE_COUNT,
          f":cluster-nodes must be {utils.NODE_COUNT}; the topology colocates a "

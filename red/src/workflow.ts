@@ -18,8 +18,10 @@ import { parName, readPars } from "red/cli";
 import * as dryRun from "red/dry-run";
 import { preflight, type PreflightContext } from "red/lifecycle";
 import * as progress from "red/progress";
-import { adviceAdd, workflow, type Opts, type WireDecl } from "red/workflow";
+import { adviceAdd, failed, workflow, type Opts, type WireDecl } from "red/workflow";
 import { compute, computeCluster } from "package-once-red";
+import * as ssh from "./ssh.ts";
+import * as sshConfig from "./ssh-config.ts";
 import * as tools from "./tools.ts";
 import * as validate from "./validate.ts";
 
@@ -107,9 +109,23 @@ export async function startStep(
              `${parName("compute-prevent-destroy")}=false for this one delete`]
           : [],
     ],
-    afterValidate: (current, _environment, ctx) => (realLifecycleEvent(ctx)
-      ? { ...current, "red/exit": 0, "postgres-ha/state": state }
-      : { ...current, "red/exit": 0 }),
+    // The machine key's create matrix and the DigitalOcean preflight run
+    // before any template is rendered: an unowned key on disk or at the
+    // provider stops the run while stopping is still free. Every other event
+    // fills the same template values — a destroy renders before it destroys —
+    // but checks no key, because the delete's key cleanup runs after the
+    // compute destroy.
+    afterValidate: async (current, _environment, ctx) => {
+      const handed = realLifecycleEvent(ctx) ? { ...current, "postgres-ha/state": state } : current;
+      if (ctx.real && ctx.event === "create") {
+        let next = await ssh.ensureKey(handed, async () => state.params);
+        if (failed(next)) return next;
+        next = await ssh.preflight(ssh.withMachineKey(next));
+        if (!failed(next)) next = sshConfig.preflight(next);
+        return failed(next) ? next : { ...next, "red/exit": 0 };
+      }
+      return { ...ssh.withMachineKey(handed), "red/exit": 0 };
+    },
   }, env);
 }
 
@@ -122,8 +138,11 @@ export function wireFn(step: string, runOpts: Opts): WireDecl | undefined {
       "postgres-ha/cluster": [tools.clusterStep, "postgres-ha/ansible-local"],
       "postgres-ha/ansible-local": [tools.ansibleLocalStep, "postgres-ha/dns"],
       "postgres-ha/dns": [tools.dnsStep, "postgres-ha/infrastructure"],
-      "postgres-ha/infrastructure": [tools.infrastructureStep,
-                                     "postgres-ha/generated-cleanup"],
+      // The keypair goes after the compute destroy (ssh-keypair.md §3.3): a
+      // key that predeceases its hosts locks the operator out of nodes that
+      // still exist.
+      "postgres-ha/infrastructure": [tools.infrastructureStep, "postgres-ha/ssh-cleanup"],
+      "postgres-ha/ssh-cleanup": [ssh.cleanupStep, "postgres-ha/generated-cleanup"],
       "postgres-ha/generated-cleanup": [tools.generatedCleanupStep],
     };
     return graph[step];
@@ -148,7 +167,7 @@ export function backendAdvice(tool: string) {
 export const sideEffectingSteps = [
   "postgres-ha/load-infrastructure", "postgres-ha/infrastructure",
   "postgres-ha/dns", "postgres-ha/ansible-local", "postgres-ha/cluster",
-  "postgres-ha/acceptance", "postgres-ha/generated-cleanup",
+  "postgres-ha/acceptance", "postgres-ha/ssh-cleanup", "postgres-ha/generated-cleanup",
 ];
 
 function create() {

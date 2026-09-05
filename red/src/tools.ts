@@ -21,6 +21,8 @@ import * as tofu from "red/tofu";
 import type { Opts } from "red/workflow";
 import { StepError, failed } from "red/workflow";
 import { compute, computeCluster } from "package-once-red";
+import * as ssh from "./ssh.ts";
+import * as sshConfig from "./ssh-config.ts";
 import * as utils from "./utils.ts";
 import * as validate from "./validate.ts";
 
@@ -188,11 +190,18 @@ export function nodes(opts: Opts): Node[] {
 // ---------------------------------------------------------------------------
 // Stage 1 — infrastructure
 
+// The compute template's data. The machine-key paths are filled here as well
+// as in preflight, so the template renders the same bytes whichever step
+// scaffolds it; in keygen mode the template references the key resource and
+// the literal list is not rendered.
 export function infrastructureData(opts: Opts): Opts {
+  opts = ssh.withMachineKey(opts);
   return {
     ...opts,
     "node-names-hcl": tofu.hclList(utils.ordinals().map((n) => utils.nodeName(opts, n))),
-    "ssh-keys-hcl": tofu.hclList(compute.cidrs(opts, "digitalocean-ssh-keys")),
+    "ssh-keys-hcl": validate.keygen(opts)
+      ? "[]"
+      : tofu.hclList(compute.cidrs(opts, "digitalocean-ssh-keys")),
     "ssh-sources-hcl": tofu.hclList(compute.cidrs(opts, "digitalocean-ssh-sources")),
     "client-sources-hcl": tofu.hclList(compute.cidrs(opts, "digitalocean-client-sources")),
   };
@@ -372,9 +381,19 @@ export async function dnsStep(opts: Opts): Promise<Opts> {
 // ---------------------------------------------------------------------------
 // Shared render data
 
-// Template data: the topology, and the adopted cluster's `vpc_ip_range`
-// winning over the fallback on a real run.
+// The private key every play and the acceptance script reach the nodes with:
+// the generated key's path in keygen mode (the build placeholder on a build or
+// a dry-run), the operator's `digitalocean-ssh-private-key` in opt-out mode.
+export function privateKeyFile(opts: Opts): string {
+  return validate.keygen(opts)
+    ? String(opts["ssh-private-key-path"])
+    : String(opts["digitalocean-ssh-private-key"] ?? "");
+}
+
+// Template data: the topology, the adopted cluster's `vpc_ip_range` winning
+// over the fallback on a real run, and the machine-key paths keygen mode owns.
 export function dataFn(opts: Opts): Opts {
+  opts = ssh.withMachineKey(opts);
   const ns = nodes(opts);
   const recorded = (opts["once/cluster"] ?? {}) as Opts;
   const facts = { ...fallbackOutputs,
@@ -385,7 +404,7 @@ export function dataFn(opts: Opts): Opts {
     nodes: ns,
     "first-node": ns[0],
     "vpc-cidr": facts.vpc_ip_range,
-    "ssh-private-key": String(opts["digitalocean-ssh-private-key"] ?? ""),
+    "ssh-private-key": privateKeyFile(opts),
     "backup-r2-s3-endpoint": utils.endpointHost(opts["backup-r2-endpoint"]),
     "backup-repo-path": utils.repoPath(opts["backup-r2-prefix"]),
     "etcd-tarball": `etcd-${etcdVersion}-linux-amd64.tar.gz`,
@@ -403,9 +422,21 @@ export function dataFn(opts: Opts): Opts {
 // ---------------------------------------------------------------------------
 // Stage 3 — local SSH configuration
 
+// Only what a `build` genuinely knows. Addresses are run-time facts and reach
+// the play as extra-vars instead, so the rendered playbook carries no IP and is
+// identical on every workstation (SSH Config Standard §6).
+export function ansibleLocalData(opts: Opts): Opts {
+  return {
+    ...dataFn(opts),
+    "ssh-keygen": validate.keygen(opts),
+    "ssh-config-identity-file": sshConfig.identityFile(opts),
+    "host-alias": sshConfig.hostAlias(opts),
+  };
+}
+
 export function ansibleLocalSpecs(opts: Opts): Spec[] {
   const dir = toolDir(opts, ansibleLocalTool);
-  const data = dataFn(opts);
+  const data = ansibleLocalData(opts);
   return [
     spec(template("ansible-local", "ansible.cfg"), `${dir}/ansible.cfg`, data),
     spec(template("ansible-local", "inventory.ini"), `${dir}/inventory.ini`, data),
@@ -420,25 +451,16 @@ export function sshConfigHosts(opts: Opts): computeCluster.SshConfigHost[] {
   return computeCluster.sshConfigHosts(validate.spec, opts, clusterNodes(opts));
 }
 
-// The per-node aliases this package wrote before it adopted the SSH Config
-// Standard's one block — `<profile>-<ordinal>`, 1-based, each under its own
-// package-prefixed marker. The play removes those blocks (ssh-config.md §8: a
-// marker change is a migration) for one pin cycle; then this goes.
-export function legacyAliases(opts: Opts): string[] {
-  return utils.ordinals().map((n) => `${opts.profile}-${n}`);
-}
-
 // What the play cannot know from a `build`: the aliases and addresses, which
 // are run-time facts and stay out of the rendered playbook so the committed
 // goldens carry no address (ssh-config.md §6), and `block_state` — `present`
 // on create, `absent` on delete — because the same playbook file serves both
-// events.
+// events. The identity file is desired state a build does know and reaches
+// the play through Selmer instead.
 export function ansibleLocalExtraVars(opts: Opts): Record<string, unknown> {
   return {
-    host_alias: String(opts.profile),
+    host_alias: sshConfig.hostAlias(opts),
     ssh_hosts: sshConfigHosts(opts),
-    legacy_aliases: legacyAliases(opts),
-    ssh_private_key: String(opts["digitalocean-ssh-private-key"] ?? ""),
     block_state: opts["red/event"] === "delete" ? "absent" : "present",
   };
 }

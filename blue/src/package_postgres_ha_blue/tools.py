@@ -29,7 +29,7 @@ from blue.workflow import StepError, failed
 from package_once_blue import compute as once_compute
 from package_once_blue import compute_cluster as cluster
 
-from . import utils, validate
+from . import ssh, ssh_config, utils, validate
 
 infrastructure_tool = "postgres-ha-infrastructure"
 dns_tool = "postgres-ha-dns"
@@ -142,10 +142,16 @@ def nodes(opts: dict) -> list[dict]:
 
 
 def infrastructure_data(opts: dict) -> dict:
+    """The compute template's data. The machine-key paths are filled here as
+    well as in preflight, so the template renders the same bytes whichever
+    step scaffolds it; in keygen mode the template references the key
+    resource and the literal list is not rendered."""
+    opts = ssh.with_machine_key(opts)
     return {
         **opts,
         "node-names-hcl": tofu.hcl_list([utils.node_name(opts, n) for n in utils.ordinals()]),
-        "ssh-keys-hcl": tofu.hcl_list(once_compute.cidrs(opts, "digitalocean-ssh-keys")),
+        "ssh-keys-hcl": ("[]" if validate.keygen(opts)
+                         else tofu.hcl_list(once_compute.cidrs(opts, "digitalocean-ssh-keys"))),
         "ssh-sources-hcl": tofu.hcl_list(once_compute.cidrs(opts, "digitalocean-ssh-sources")),
         "client-sources-hcl": tofu.hcl_list(once_compute.cidrs(opts, "digitalocean-client-sources")),
     }
@@ -332,9 +338,21 @@ async def dns_step(opts: dict) -> dict:
 # Shared render data
 
 
+def private_key_file(opts: dict) -> str:
+    """The private key every play and the acceptance script reach the nodes
+    with: the generated key's path in keygen mode (the build placeholder on a
+    build or a dry-run), the operator's `digitalocean-ssh-private-key` in
+    opt-out mode."""
+    if validate.keygen(opts):
+        return str(opts.get("ssh-private-key-path"))
+    return str(opts.get("digitalocean-ssh-private-key") or "")
+
+
 def data_fn(opts: dict) -> dict:
-    """Template data: the topology, and the adopted cluster's `vpc_ip_range`
-    winning over the fallback on a real run."""
+    """Template data: the topology, the adopted cluster's `vpc_ip_range`
+    winning over the fallback on a real run, and the machine-key paths keygen
+    mode owns."""
+    opts = ssh.with_machine_key(opts)
     ns = nodes(opts)
     recorded = opts.get("once/cluster") or {}
     facts = {**fallback_outputs, **{k: recorded[k] for k in fallback_outputs if k in recorded}}
@@ -344,7 +362,7 @@ def data_fn(opts: dict) -> dict:
         "nodes": ns,
         "first-node": ns[0],
         "vpc-cidr": facts["vpc_ip_range"],
-        "ssh-private-key": str(opts.get("digitalocean-ssh-private-key") or ""),
+        "ssh-private-key": private_key_file(opts),
         "backup-r2-s3-endpoint": utils.endpoint_host(opts.get("backup-r2-endpoint")),
         "backup-repo-path": utils.repo_path(opts.get("backup-r2-prefix")),
         "etcd-tarball": f"etcd-{etcd_version}-linux-amd64.tar.gz",
@@ -363,9 +381,19 @@ def data_fn(opts: dict) -> dict:
 # Stage 3 — local SSH configuration
 
 
+def ansible_local_data(opts: dict) -> dict:
+    """Only what a `build` genuinely knows. Addresses are run-time facts and
+    reach the play as extra-vars instead, so the rendered playbook carries no
+    IP and is identical on every workstation (SSH Config Standard §6)."""
+    return {**data_fn(opts),
+            "ssh-keygen": validate.keygen(opts),
+            "ssh-config-identity-file": ssh_config.identity_file(opts),
+            "host-alias": ssh_config.host_alias(opts)}
+
+
 def ansible_local_specs(opts: dict) -> list[dict]:
     dir = tool_dir(opts, ansible_local_tool)
-    data = data_fn(opts)
+    data = ansible_local_data(opts)
     return [
         spec(template("ansible-local", "ansible.cfg"), f"{dir}/ansible.cfg", data),
         spec(template("ansible-local", "inventory.ini"), f"{dir}/inventory.ini", data),
@@ -380,27 +408,16 @@ def ssh_config_hosts(opts: dict) -> list[dict]:
     return cluster.ssh_config_hosts(validate.spec, opts, _cluster_nodes(opts))
 
 
-def legacy_aliases(opts: dict) -> list[str]:
-    """The per-node aliases this package wrote before it adopted the SSH
-    Config Standard's one block — `<profile>-<ordinal>`, 1-based, each under
-    its own package-prefixed marker. The play removes those blocks
-    (ssh-config.md §8: a marker change is a migration) for one pin cycle;
-    then this goes."""
-    return [f"{opts.get('profile')}-{n}" for n in utils.ordinals()]
-
-
 def ansible_local_extra_vars(opts: dict) -> dict:
     """What the play cannot know from a `build`: the aliases and addresses,
     which are run-time facts and stay out of the rendered playbook so the
     committed goldens carry no address (ssh-config.md §6), and `block_state`
     — `present` on create, `absent` on delete — because the same playbook
-    file serves both events."""
-    key = opts.get("digitalocean-ssh-private-key")
+    file serves both events. The identity file is desired state a build does
+    know and reaches the play through Selmer instead."""
     return {
-        "host_alias": str(opts.get("profile")),
+        "host_alias": ssh_config.host_alias(opts),
         "ssh_hosts": ssh_config_hosts(opts),
-        "legacy_aliases": legacy_aliases(opts),
-        "ssh_private_key": "" if key is None else str(key),
         "block_state": "absent" if opts.get("blue/event") == "delete" else "present",
     }
 

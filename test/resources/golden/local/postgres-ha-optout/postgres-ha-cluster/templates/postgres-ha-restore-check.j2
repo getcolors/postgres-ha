@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# postgres-ha-restore-check — the verified restore.
+#
+# A backup that has never been restored is a hypothesis. This restores the
+# latest full backup into a scratch directory, replays every archived WAL
+# segment on top of it, starts the result as a real PostgreSQL on a spare port,
+# and asserts that the data it contains is minutes old rather than a day old.
+# Then it throws the whole thing away.
+#
+# It runs on a standby, never on the leader: the restore is I/O heavy and the
+# leader is the one node whose latency a client is waiting on.
+#
+# Two safety properties matter more than anything else here:
+#
+#   * `--archive-mode=off`. A restored copy that promoted with archiving still
+#     enabled would push its own WAL into the shared repository on a timeline
+#     the real cluster also uses, and quietly poison every future restore.
+#   * a scratch socket directory and a spare port, so nothing about this can be
+#     mistaken for — or connected to instead of — the live cluster.
+set -euo pipefail
+umask 077
+
+PATRONI_URL="http://{{ private_ip }}:8008"
+STANZA="main"
+DB="appdb"
+BIN="/usr/lib/postgresql/17/bin"
+PORT=5442
+SCRATCH=/var/lib/postgresql/restore-check
+SOCKET="$SCRATCH.sock"
+STAMP=/var/lib/postgresql/.postgres-ha-restore-check
+MAX_LAG=900
+
+if [ "$(id -un)" != postgres ]; then
+  exec sudo -n -u postgres -- "$0" "$@"
+fi
+
+if ! curl -fs -o /dev/null --max-time 5 "$PATRONI_URL/replica"; then
+  echo "postgres-ha-restore-check: {{ inventory_hostname }} is not a streaming standby; nothing to do"
+  exit 0
+fi
+
+teardown() {
+  if [ -d "$SCRATCH" ]; then
+    "$BIN/pg_ctl" -D "$SCRATCH" -m immediate -w -t 60 stop >/dev/null 2>&1 || true
+  fi
+  rm -rf "$SCRATCH" "$SOCKET"
+}
+trap teardown EXIT
+
+rm -rf "$SCRATCH" "$SOCKET"
+mkdir -p "$SCRATCH" "$SOCKET"
+chmod 700 "$SCRATCH" "$SOCKET"
+
+echo "postgres-ha-restore-check: restoring stanza $STANZA into $SCRATCH"
+pgbackrest --stanza="$STANZA" --pg1-path="$SCRATCH" --archive-mode=off \
+  --log-level-console=warn restore
+
+# Only the things that must not collide with the live cluster are overridden.
+# Settings such as max_connections are deliberately left at the values the
+# backup carries: PostgreSQL refuses to start a hot standby whose limits are
+# below the primary's, and lowering them here would fail the check for a reason
+# that has nothing to do with the backup.
+"$BIN/pg_ctl" -D "$SCRATCH" -w -t 900 -l "$SCRATCH/restore-check.log" \
+  -o "-p $PORT -c listen_addresses=127.0.0.1 -c unix_socket_directories=$SOCKET -c archive_mode=off -c hot_standby=on" \
+  start
+
+psql_scratch() {
+  psql -X -q -tA -h "$SOCKET" -p "$PORT" -d "$1" -c "$2"
+}
+
+echo "postgres-ha-restore-check: replaying archived WAL"
+for _ in $(seq 1 180); do
+  if [ "$(psql_scratch postgres 'SELECT pg_is_in_recovery()')" = f ]; then
+    break
+  fi
+  sleep 5
+done
+
+if [ "$(psql_scratch postgres 'SELECT pg_is_in_recovery()')" != f ]; then
+  echo "postgres-ha-restore-check: FAILED — the restored cluster never left recovery" >&2
+  exit 1
+fi
+
+rows=$(psql_scratch "$DB" 'SELECT count(*) FROM colors_restore_sentinel')
+newest=$(psql_scratch "$DB" "SELECT coalesce(max(written), 'epoch'::timestamptz) FROM colors_restore_sentinel")
+lag=$(psql_scratch "$DB" \
+  "SELECT floor(extract(epoch FROM now() - coalesce(max(written), 'epoch'::timestamptz)))::bigint FROM colors_restore_sentinel")
+
+# The row count proves the backup restored. The lag proves the WAL written
+# *after* that backup was archived and replayed — which is the part a
+# restore-only check would silently never exercise.
+if [ "$rows" -lt 1 ]; then
+  echo "postgres-ha-restore-check: FAILED — the restored copy has no sentinel rows" >&2
+  exit 1
+fi
+
+if [ "$lag" -gt "$MAX_LAG" ]; then
+  echo "postgres-ha-restore-check: FAILED — newest restored heartbeat is ${lag}s old, above the ${MAX_LAG}s limit;" >&2
+  echo "  the backup restored but continuous WAL archiving has fallen behind or stopped" >&2
+  exit 1
+fi
+
+printf '%s restored=%s rows=%s lag=%ss node=%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$newest" "$rows" "$lag" "{{ inventory_hostname }}" > "$STAMP"
+
+echo "postgres-ha-restore-check: OK — restored $rows sentinel rows, newest heartbeat ${lag}s old"

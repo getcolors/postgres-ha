@@ -24,6 +24,8 @@
             [green.workflow :as wf]
             [io.github.getcolors.once.compute :as compute]
             [io.github.getcolors.once.compute-cluster :as cluster]
+            [io.github.getcolors.postgres-ha.ssh :as ssh]
+            [io.github.getcolors.postgres-ha.ssh-config :as ssh-config]
             [io.github.getcolors.postgres-ha.utils :as utils]
             [io.github.getcolors.postgres-ha.validate :as validate]))
 
@@ -118,12 +120,28 @@
 ;; Stage 1 — infrastructure
 
 (defn infrastructure-data
+  "The compute template's data. The machine-key paths are filled here as well
+  as in preflight, so the template renders the same bytes whichever step
+  scaffolds it; in keygen mode the template references the key resource and
+  the literal list is not rendered."
   [opts]
-  (assoc opts
+  (let [opts (ssh/with-machine-key opts)]
+    (assoc opts
          :node-names-hcl (tofu/hcl-list (map #(utils/node-name opts %) (utils/ordinals)))
-         :ssh-keys-hcl (tofu/hcl-list (compute/cidrs opts :digitalocean-ssh-keys))
+         :ssh-keys-hcl (if (validate/keygen? opts)
+                         "[]"
+                         (tofu/hcl-list (compute/cidrs opts :digitalocean-ssh-keys)))
          :ssh-sources-hcl (tofu/hcl-list (compute/cidrs opts :digitalocean-ssh-sources))
-         :client-sources-hcl (tofu/hcl-list (compute/cidrs opts :digitalocean-client-sources))))
+         :client-sources-hcl (tofu/hcl-list (compute/cidrs opts :digitalocean-client-sources)))))
+
+(defn private-key-file
+  "The private key every play and the acceptance script reach the nodes with:
+  the generated key's path in keygen mode (the build placeholder on a build or
+  a dry-run), the operator's `digitalocean-ssh-private-key` in opt-out mode."
+  [opts]
+  (if (validate/keygen? opts)
+    (str (:ssh-private-key-path opts))
+    (str (:digitalocean-ssh-private-key opts))))
 
 (defn infrastructure-specs
   [opts]
@@ -301,17 +319,19 @@
 ;; Shared render data
 
 (defn data-fn
-  "Template data: the topology, and the adopted cluster's `vpc_ip_range`
-  winning over the fallback on a real run."
+  "Template data: the topology, the adopted cluster's `vpc_ip_range` winning
+  over the fallback on a real run, and the machine-key paths keygen mode
+  owns."
   [opts]
-  (let [ns (nodes opts)
+  (let [opts (ssh/with-machine-key opts)
+        ns (nodes opts)
         facts (merge fallback-outputs
                      (select-keys (:once/cluster opts) (keys fallback-outputs)))]
     (assoc opts
            :nodes ns
            :first-node (first ns)
            :vpc-cidr (:vpc_ip_range facts)
-           :ssh-private-key (str (:digitalocean-ssh-private-key opts))
+           :ssh-private-key (private-key-file opts)
            :backup-r2-s3-endpoint (utils/endpoint-host (:backup-r2-endpoint opts))
            :backup-repo-path (utils/repo-path (:backup-r2-prefix opts))
            :etcd-tarball (str "etcd-" (:etcd-version opts) "-linux-amd64.tar.gz")
@@ -328,10 +348,20 @@
 ;; ---------------------------------------------------------------------------
 ;; Stage 3 — local SSH configuration
 
+(defn ansible-local-data
+  "Only what a `build` genuinely knows. Addresses are run-time facts and reach
+  the play as extra-vars instead, so the rendered playbook carries no IP and
+  is identical on every workstation (SSH Config Standard §6)."
+  [opts]
+  (assoc (data-fn opts)
+         :ssh-keygen (validate/keygen? opts)
+         :ssh-config-identity-file (ssh-config/identity-file opts)
+         :host-alias (ssh-config/host-alias opts)))
+
 (defn ansible-local-specs
   [opts]
   (let [dir (tool-dir opts ansible-local-tool)
-        data (data-fn opts)]
+        data (ansible-local-data opts)]
     [(spec (template "ansible-local" "ansible.cfg") (str dir "/ansible.cfg") data)
      (spec (template "ansible-local" "inventory.ini") (str dir "/inventory.ini") data)
      (spec (template "ansible-local" "main.yml") (str dir "/main.yml") data)]))
@@ -343,25 +373,16 @@
   [opts]
   (cluster/ssh-config-hosts validate/spec opts (cluster-nodes opts)))
 
-(defn legacy-aliases
-  "The per-node aliases this package wrote before it adopted the SSH Config
-  Standard's one block — `<profile>-<ordinal>`, 1-based, each under its own
-  package-prefixed marker. The play removes those blocks (ssh-config.md §8: a
-  marker change is a migration) for one pin cycle; then this goes."
-  [opts]
-  (mapv #(str (:profile opts) "-" %) (utils/ordinals)))
-
 (defn ansible-local-extra-vars
   "What the play cannot know from a `build`: the aliases and addresses,
   which are run-time facts and stay out of the rendered playbook so the
   committed goldens carry no address (ssh-config.md §6), and `block_state`
   — `present` on create, `absent` on delete — because the same playbook file
-  serves both events."
+  serves both events. The identity file is desired state a build does know
+  and reaches the play through Selmer instead."
   [opts]
-  {:host_alias (str (:profile opts))
+  {:host_alias (ssh-config/host-alias opts)
    :ssh_hosts (ssh-config-hosts opts)
-   :legacy_aliases (legacy-aliases opts)
-   :ssh_private_key (str (:digitalocean-ssh-private-key opts))
    :block_state (if (= :delete (:green/event opts)) "absent" "present")})
 
 (defn ansible-local-step

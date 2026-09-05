@@ -19,6 +19,8 @@
             [green.progress :as progress]
             [green.workflow :as wf]
             [io.github.getcolors.once.compute-cluster :as cluster]
+            [io.github.getcolors.postgres-ha.ssh :as ssh]
+            [io.github.getcolors.postgres-ha.ssh-config :as ssh-config]
             [io.github.getcolors.postgres-ha.tools :as tools]
             [io.github.getcolors.postgres-ha.validate :as validate]))
 
@@ -101,9 +103,22 @@
                   (green-cli/par-name :compute-prevent-destroy)
                   "=false for this one delete")]))]
        :after-validate
-       (fn [opts _ ctx]
-         (cond-> (assoc opts :green/exit 0)
-           (real-lifecycle-event? ctx) (assoc :postgres-ha/state state)))}
+       ;; The machine key's create matrix and the DigitalOcean preflight run
+       ;; before any template is rendered: an unowned key on disk or at the
+       ;; provider stops the run while stopping is still free. Every other
+       ;; event fills the same template values — a destroy renders before it
+       ;; destroys — but checks no key, because the delete's key cleanup runs
+       ;; after the compute destroy.
+       (fn [opts _ {:keys [event real?] :as ctx}]
+         (let [opts (cond-> opts (real-lifecycle-event? ctx) (assoc :postgres-ha/state state))]
+           (if (and real? (= :create event))
+             (let [opts (ssh/ensure-key! opts (fn [_] (:params state)))]
+               (if (wf/failed? opts)
+                 opts
+                 (let [opts (ssh/preflight! (ssh/with-machine-key opts))
+                       opts (if (wf/failed? opts) opts (ssh-config/preflight! opts))]
+                   (if (wf/failed? opts) opts (assoc opts :green/exit 0)))))
+             (assoc (ssh/with-machine-key opts) :green/exit 0))))}
       env))))
 
 (defn wire-fn
@@ -116,8 +131,11 @@
       :postgres-ha/cluster [tools/cluster-step :postgres-ha/ansible-local]
       :postgres-ha/ansible-local [tools/ansible-local-step :postgres-ha/dns]
       :postgres-ha/dns [tools/dns-step :postgres-ha/infrastructure]
-      :postgres-ha/infrastructure [tools/infrastructure-step
-                                   :postgres-ha/generated-cleanup]
+      ;; The keypair goes after the compute destroy (ssh-keypair.md §3.3): a
+      ;; key that predeceases its hosts locks the operator out of nodes that
+      ;; still exist.
+      :postgres-ha/infrastructure [tools/infrastructure-step :postgres-ha/ssh-cleanup]
+      :postgres-ha/ssh-cleanup [ssh/cleanup-step :postgres-ha/generated-cleanup]
       :postgres-ha/generated-cleanup [tools/generated-cleanup-step])
     (case step
       :postgres-ha/start [start-step :postgres-ha/infrastructure]
@@ -136,7 +154,7 @@
 (def side-effecting-steps
   [:postgres-ha/load-infrastructure :postgres-ha/infrastructure
    :postgres-ha/dns :postgres-ha/ansible-local :postgres-ha/cluster
-   :postgres-ha/acceptance :postgres-ha/generated-cleanup])
+   :postgres-ha/acceptance :postgres-ha/ssh-cleanup :postgres-ha/generated-cleanup])
 
 (def workflow
   (-> (wf/workflow {:start :postgres-ha/start :wire-fn wire-fn})
