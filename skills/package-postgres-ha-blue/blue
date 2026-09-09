@@ -5,7 +5,7 @@
 #
 # [tool.uv.sources]
 # colors-compute-blue = { git = "https://github.com/getcolors/colors-compute.git", rev = "85bf076dfe2c34025dc9362f1cc4c5bc92a4373d", subdirectory = "blue" }
-# package-postgres-ha-blue = { git = "https://github.com/getcolors/postgres-ha.git", rev = "4be0bfb3706902fee07c71746aa7ba55244c6bec", subdirectory = "blue" }
+# package-postgres-ha-blue = { git = "https://github.com/getcolors/postgres-ha.git", rev = "4d72a81f536a948a6bace58e4d5a2cecf18fea6e", subdirectory = "blue" }
 # blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
 #
 # [tool.uv]
