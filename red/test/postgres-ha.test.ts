@@ -305,13 +305,14 @@ describe("tools", () => {
     const data = tools.ansibleLocalSpecs(fixture)[0]!.data as Opts;
     expect(data["ssh-keygen"]).toBe(true);
     expect(data["ssh-config-identity-file"]).toBe("~/.ssh/postgres-ha-fixture");
-    expect((tools.ansibleLocalSpecs(optout)[0]!.data as Opts)["ssh-keygen"]).toBe(true);
+    expect((tools.ansibleLocalSpecs(optout)[0]!.data as Opts)["ssh-keygen"]).toBe(false);
     expect(tools.ansibleLocalExtraVars({ ...converged(), "red/event": "delete" }).block_state).toBe("absent");
     // a build renders the play without an address
     const rendered = readFileSync(join(import.meta.dir, "../resources/tools/ansible-local/main.yml"), "utf8");
-    expect(rendered).toContain('marker: "# {mark} {{ host_alias }} ANSIBLE MANAGED BLOCK"');
-    expect(rendered).toContain("{% for host in ssh_hosts %}");
-    expect(rendered).toContain("insertbefore: BOF");
+    expect(rendered).toContain("begin = '# BEGIN ' + profile + ' ANSIBLE MANAGED BLOCK'");
+    expect(rendered).toContain('fcntl.LOCK_EX');
+    expect(rendered).toContain("for host in hosts:");
+    expect(rendered).toContain("os.replace(temporary, path)");
     expect(/192\.0\.2|203\.0\.113/.test(rendered)).toBe(false);
   });
 

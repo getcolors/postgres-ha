@@ -162,7 +162,7 @@
   is identical on every workstation (SSH Config Standard §6)."
   [opts]
   (assoc (data-fn opts)
-         :ssh-keygen (or (validate/keygen? opts) (boolean (:ssh-private-key-path opts)))
+         :ssh-keygen (validate/keygen? opts)
          :ssh-config-identity-file (if (validate/keygen? opts) (ssh-config/identity-file opts) (or (:ssh-private-key-path opts) ""))
          :host-alias (ssh-config/host-alias opts)))
 

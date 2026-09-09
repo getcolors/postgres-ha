@@ -215,7 +215,7 @@ export function ansibleLocalData(opts: Opts): Opts {
   opts=ssh.withMachineKey(opts);
   return {
     ...dataFn(opts),
-    "ssh-keygen": validate.keygen(opts) || Boolean(opts["ssh-private-key-path"]),
+    "ssh-keygen": validate.keygen(opts),
     "ssh-config-identity-file": validate.keygen(opts) ? sshConfig.identityFile(opts) : opts["ssh-private-key-path"] || "",
     "host-alias": sshConfig.hostAlias(opts),
   };
