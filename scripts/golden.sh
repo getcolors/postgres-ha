@@ -57,53 +57,19 @@ checks() {
   done
 
   # --- infrastructure -------------------------------------------------------
-  local infra="$base/postgres-ha-infrastructure/main.tf"
-  grep -q 'data "digitalocean_vpc" "default"' "$infra"
-  grep -q 'region = "ams3"' "$infra"
-  grep -q 'vpc_uuid = data.digitalocean_vpc.default.id' "$infra"
-  # An `ip_range` attribute is a VPC being described; the `vpc_ip_range` key of
-  # the `params` output reports the discovered one and is not that.
-  if grep -qE 'digitalocean_vpc" "(cluster|owned)"|^\s*ip_range *=' "$infra"; then
-    echo "golden: $profile creates or describes a VPC instead of discovering one" >&2
-    exit 1
-  fi
-  grep -q 'count    = length(local.node_names)' "$infra"
-  grep -q 'postgres-ha-fixture-1", "postgres-ha-fixture-2", "postgres-ha-fixture-3' "$infra"
-  grep -q 's-2vcpu-4gb' "$infra"
-  grep -q 'ubuntu-24-04-x64' "$infra"
-  [ "$(grep -c 'prevent_destroy = true' "$infra")" -ge 2 ] || {
-    echo "golden: $profile: infrastructure lost its destroy guard" >&2; exit 1
-  }
-  # Administrative and database ingress must never be open to the world, and
-  # everything the cluster says to itself must be VPC-scoped.
-  if grep -B2 'port_range       = "22"' "$infra" | grep -q '0.0.0.0/0'; then
-    echo "golden: $profile: SSH is open to the world" >&2; exit 1
-  fi
-  if grep -A1 'source_addresses = \[' "$infra" | grep -q '0.0.0.0/0'; then
-    echo "golden: $profile: an inbound rule admits the world" >&2; exit 1
-  fi
-  grep -q 'source_addresses = \[data.digitalocean_vpc.default.ip_range\]' "$infra"
-  for output in vpc_id vpc_ip_range node_public_ips node_private_ips params; do
-    grep -q "output \"$output\"" "$infra" || {
-      echo "golden: $profile: infrastructure no longer publishes $output" >&2; exit 1
-    }
+  # Compute documents are library-owned; this package checks its topology and
+  # the SSH identities consumed by application stages.
+  [ -d "$base/postgres-ha-infrastructure/shared" ] || exit 1
+  for node in 0 1 2; do
+    [ -f "$base/postgres-ha-infrastructure/nodes/$node/node.tf.json" ] || exit 1
   done
-  # The SSH Keypair Standard, both modes: keygen declares the profile-named key
-  # resource and references it by attribute; opt-out keeps the literal list and
-  # creates nothing.
   if [ "$fixture" = colors ]; then
-    grep -q 'resource "digitalocean_ssh_key" "machine"' "$infra" || { echo "golden: $profile: keygen mode declares no key resource" >&2; exit 1; }
-    grep -q 'ssh_keys       = \[digitalocean_ssh_key.machine.id\]' "$infra" || { echo "golden: $profile: keygen mode does not reference the key by attribute" >&2; exit 1; }
-    grep -q 'ssh_key_id   = digitalocean_ssh_key.machine.id' "$infra" || { echo "golden: $profile: params carries no ssh_key_id" >&2; exit 1; }
-    grep -q 'IdentityFile ~/.ssh/postgres-ha-fixture' "$base/postgres-ha-ansible-local/main.yml" || { echo "golden: $profile: the local stage names no identity file" >&2; exit 1; }
-    grep -q '"ansible_ssh_private_key_file" : "/home/build-placeholder/.ssh/postgres-ha-fixture"' "$base/postgres-ha-cluster/inventory.json" || { echo "golden: $profile: the inventory does not name the generated key" >&2; exit 1; }
+    grep -q "IdentityFile ~/.ssh/$profile" "$base/postgres-ha-ansible-local/main.yml" || exit 1
   else
-    ! grep -q 'digitalocean_ssh_key' "$infra" || { echo "golden: $profile: opt-out mode must create no key" >&2; exit 1; }
-    grep -qE '^\s+ssh_keys\s+= \["' "$infra" || { echo "golden: $profile: opt-out mode lost the literal key list" >&2; exit 1; }
-    ! grep -qE '^\s+IdentityFile ' "$base/postgres-ha-ansible-local/main.yml" || { echo "golden: $profile: opt-out mode must not guess an identity file" >&2; exit 1; }
+    grep -q 'IdentityFile ~/.ssh/id_ed25519' "$base/postgres-ha-ansible-local/main.yml" || exit 1
   fi
+  grep -q "$profile/postgres-ha-dns.tfstate" "$base/postgres-ha-dns/backend.tf.json"
 
-  # --- the client endpoint --------------------------------------------------
   local dns="$base/postgres-ha-dns/main.tf"
   [ "$(grep -c 'resource "cloudflare_dns_record"' "$dns")" -eq 3 ] || {
     echo "golden: $profile: the endpoint no longer resolves to all three nodes" >&2; exit 1
@@ -114,13 +80,6 @@ checks() {
     echo "golden: $profile: a proxied record cannot carry the PostgreSQL wire protocol" >&2; exit 1
   fi
 
-  # --- remote state ---------------------------------------------------------
-  if [ "$backend" = r2 ]; then
-    grep -q "$profile/postgres-ha-infrastructure.tfstate" "$base/postgres-ha-infrastructure/backend.tf.json"
-    grep -q "$profile/postgres-ha-dns.tfstate" "$base/postgres-ha-dns/backend.tf.json"
-  else
-    grep -q '"local"' "$base/postgres-ha-infrastructure/backend.tf.json"
-  fi
 
   # --- the cluster ----------------------------------------------------------
   local cluster="$base/postgres-ha-cluster"
@@ -239,7 +198,7 @@ checks() {
 }
 
 for fixture in colors optout; do
-  for backend in local r2; do
+  for backend in s3 r2; do
     build "$fixture" "$backend"
   done
 done

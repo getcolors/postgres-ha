@@ -1,11 +1,3 @@
-// Launcher contract and deterministic topology helpers, the port of
-// io.github.getcolors.postgres-ha.utils.
-//
-// Everything here is a pure function of desired state. The topology is derived
-// rather than configured: three nodes with stable ordinals and stable droplet
-// names, so an OpenTofu address and an inventory host name never move because
-// a list was reordered. The `~/.ssh/config` aliases are the Compute Cluster
-// Standard's, derived by ONCE and wrapped in `tools.sshAlias`.
 
 import type { Opts } from "red/workflow";
 
@@ -21,18 +13,6 @@ export const nodeCount = 3;
 // 1..nodeCount. The one place the node range is produced.
 export function ordinals(): number[] {
   return Array.from({ length: nodeCount }, (_, i) => i + 1);
-}
-
-export function baseName(opts: Opts): string {
-  const name = String(opts["digitalocean-name"] ?? "");
-  return name.length ? name : "postgres-ha";
-}
-
-// The droplet name for ordinal `n`, also the Ansible inventory host name and
-// the Patroni member name. One string for all three keeps `patronictl list`,
-// `tofu state list` and the inventory mutually greppable.
-export function nodeName(opts: Opts, n: number): string {
-  return `${baseName(opts)}-${n}`;
 }
 
 // The Ansible expression that reads a credential at play time.

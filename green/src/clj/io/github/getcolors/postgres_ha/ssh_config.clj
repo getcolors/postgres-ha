@@ -11,11 +11,12 @@
   (standard §7). The file is shared with every other host the operator reaches,
   so an unrelated change upstream must not be able to rewrite it at pin-bump
   time. The alias list, though, is the Compute Cluster Standard's (§6) and
-  comes from ONCE."
+  comes from the shared compute topology."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [io.github.getcolors.postgres-ha.validate :as validate]
-            [io.github.getcolors.once.compute-cluster :as once-cluster]))
+            [io.github.getcolors.compute :as library]
+            [io.github.getcolors.postgres-ha.compute :as compute]))
 
 (defn host-alias
   "The profile, unchanged. Standard §2: the profile already keys remote state,
@@ -33,7 +34,7 @@
 (defn aliases
   "Every alias this deployment owns: the bare profile, which reaches node 0 and
   is what the standard promises an operator can type, plus `<profile>-<i>` per
-  node, matching the machine label. ONCE derives the list from the spec
+  node, matching the machine label. The compute library derives the node IDs
   (Compute Cluster Standard §6).
 
   A single-node package needs only the first. Here the per-node aliases are
@@ -41,7 +42,7 @@
   is reaching one specific member — and the bare profile keeps `ssh <profile>`
   meaning what it means in every other deployment."
   [opts]
-  (once-cluster/aliases validate/spec opts))
+  (into [(:profile opts)] (map #(str (:profile opts) "-" (:node_id %)) (library/expand (compute/topology opts)))))
 
 (defn config-path []
   (io/file (System/getProperty "user.home") ".ssh" "config"))

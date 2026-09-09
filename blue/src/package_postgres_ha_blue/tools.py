@@ -1,16 +1,4 @@
-"""The five stages: DigitalOcean infrastructure, Cloudflare DNS, local SSH
-configuration, the remote cluster convergence, and acceptance — the port of
-io.github.getcolors.postgres-ha.tools.
-
-Every stage renders into `.colors/<profile>/<stage>/` and, for the OpenTofu
-ones, keys its remote state at `<profile>/<stage>.tfstate`. Those two names
-are the deployment's identity; changing either orphans live infrastructure,
-so they are constants here and asserted by the golden suite.
-
-The cluster itself — which machines exist, at which addresses — is the
-Compute Cluster Standard's `params`, adopted through ONCE's `compute_cluster`
-module and carried under `once/cluster`. This package puts its own facts
-inside it: `vpc_id` and `vpc_ip_range` at the top level."""
+"""Application facts derived from the shared compute library."""
 
 from __future__ import annotations
 
@@ -23,13 +11,15 @@ from blue import tofu
 from blue.ansible import ansible_with_spec
 from blue.cli import stage_dir
 from blue.providers import tool_env
+from package_once_blue.validate import providers as once_backends
 from blue.runtime import runtime
 from blue.scaffold import PRESERVE_JINJA_DELIMITERS, content_spec, scaffold
 from blue.workflow import StepError, failed
-from package_once_blue import compute as once_compute
-from package_once_blue import compute_cluster as cluster
+from colors_compute.orchestration import orchestrate
+from colors_compute.planning import plan_deployment
+from colors_compute.inspection import read_deployment
 
-from . import ssh, ssh_config, utils, validate
+from . import compute, ssh, ssh_config, utils, validate
 
 infrastructure_tool = "postgres-ha-infrastructure"
 dns_tool = "postgres-ha-dns"
@@ -63,7 +53,7 @@ def raw_spec(target: str, content: str) -> dict:
 
 
 def credential_env(opts: dict, *slots: str) -> dict[str, str] | None:
-    return tool_env(validate.providers, opts, [*slots, "provider-backend"])
+    return tool_env({**validate.providers, "provider-backend": once_backends["provider-backend"]}, opts, [*slots, "provider-backend"])
 
 
 def backend_credential_env(opts: dict) -> dict[str, str] | None:
@@ -86,44 +76,21 @@ def _refuse(opts: dict, errors: list[str]) -> dict:
 # Placeholder topology
 #
 # `build` renders the whole tree without contacting a provider, so it needs
-# values that are obviously not real. The nodes are ONCE's fallbacks — RFC
-# 5737 TEST-NET-1 public addresses and RFC 1918 private ones cut from `spec`'s
 # subnet at offset 11 — and the network facts beside them are the stand-ins
 # below. A golden file that leaked into a real run fails loudly rather than
 # pointing at somebody's host, and the goldens stay a pure function of
 # colors.yml.
 
-fallback_outputs = {
-    "vpc_id": "00000000-0000-0000-0000-000000000000",
-    "vpc_ip_range": "10.114.0.0/20",
-}
+def _cluster_nodes(opts):
+    return compute.resolved(opts)
 
 
-def _cluster_nodes(opts: dict) -> list[dict]:
-    """ONCE's nodes for this deployment: the adopted `params.nodes` on a real
-    run, the fallbacks on a build — renamed to what this package has always
-    called its nodes, `<name>-<ordinal>`, so the rendered inventory is
-    byte-identical to what it was."""
-    params = opts.get("once/cluster")
-    nodes = cluster.nodes(validate.spec, opts, params)
-    if params is not None:
-        return list(nodes)
-    return [{**node, "name": utils.node_name(opts, node["index"] + 1)} for node in nodes]
-
-
-def ssh_alias(opts: dict, n: int) -> str:
-    """The `~/.ssh/config` Host entry the operator commands use for ordinal
-    `n`: ONCE's `<profile>-<index>`, the Compute Cluster Standard's alias for
-    the node at 0-based `index`. ONCE's list opens with the bare profile, so
-    the 1-based ordinal is also the position of its node's alias."""
-    return cluster.aliases(validate.spec, opts)[n]
+def ssh_alias(opts, n):
+    return opts['profile'] + '-' + str(n - 1)
 
 
 def nodes(opts: dict) -> list[dict]:
-    """The rendered topology: one map per ordinal over the node ONCE reports
-    — the adopted cluster on a real run, the placeholders before the
-    infrastructure stage has run. Pure: given the same opts it is the same
-    list, which is what makes the inventory and the goldens deterministic."""
+    """Application facts derived from the shared compute library."""
     members = []
     for node in _cluster_nodes(opts):
         ordinal = node["index"] + 1
@@ -133,6 +100,7 @@ def nodes(opts: dict) -> list[dict]:
             "alias": ssh_alias(opts, ordinal),
             "public-ip": node.get("ip"),
             "private-ip": node.get("vpc_ip"),
+            "user": node["user"],
         })
     return members
 
@@ -141,180 +109,41 @@ def nodes(opts: dict) -> list[dict]:
 # Stage 1 — infrastructure
 
 
-def infrastructure_data(opts: dict) -> dict:
-    """The compute template's data. The machine-key paths are filled here as
-    well as in preflight, so the template renders the same bytes whichever
-    step scaffolds it; in keygen mode the template references the key
-    resource and the literal list is not rendered."""
-    opts = ssh.with_machine_key(opts)
-    return {
-        **opts,
-        "node-names-hcl": tofu.hcl_list([utils.node_name(opts, n) for n in utils.ordinals()]),
-        "ssh-keys-hcl": ("[]" if validate.keygen(opts)
-                         else tofu.hcl_list(once_compute.cidrs(opts, "digitalocean-ssh-keys"))),
-        "ssh-sources-hcl": tofu.hcl_list(once_compute.cidrs(opts, "digitalocean-ssh-sources")),
-        "client-sources-hcl": tofu.hcl_list(once_compute.cidrs(opts, "digitalocean-client-sources")),
-    }
+async def infrastructure_step(opts):
+    planning = opts.get('blue/event') == 'build' or opts.get('blue/dry-run')
+    result = plan_deployment(opts, compute.topology(opts), compute.requirements(opts)) if planning else await orchestrate(opts, compute.topology(opts), compute.requirements(opts))
+    if result['status'] not in ('planned', 'ready', 'destroyed'):
+        return _refuse(opts, ['compute lifecycle refused; legacy monolithic state requires explicit migration'])
+    if planning:
+        directory = Path(tool_dir(opts, infrastructure_tool))
+        for stage, documents in [('shared', result['documents']['shared']), *[(f'nodes/{node}', docs) for node, docs in result['documents']['nodes'].items()]]:
+            for name, document in documents.items():
+                path = directory / stage / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(document, sort_keys=True, indent=2) + '\n')
+    result_opts = {**opts, 'blue/exit': 0}
+    if 'cluster' in result:
+        result_opts['colors-compute/cluster'] = result['cluster']
+        result_opts['colors-compute/shared'] = result.get('shared', {})
+    path = result.get('key', {}).get('private_key_path')
+    if path:
+        result_opts['ssh-private-key-path'] = path.replace('$HOME/.ssh', '/home/build-placeholder/.ssh') if planning else path
+    return result_opts
 
 
-def infrastructure_specs(opts: dict) -> list[dict]:
-    dir = tool_dir(opts, infrastructure_tool)
-    return [spec(template("infrastructure", "main.tf"), f"{dir}/main.tf",
-                 infrastructure_data(opts))]
-
-
-def output_params(result: dict) -> dict | None:
-    """The compute stage's `params` output, as ONCE reads it; None when the
-    apply reported none."""
-    return cluster.output_params({"tofu/outputs": result.get("postgres-ha/outputs")})
-
-
-def _non_blank(v) -> bool:
-    return isinstance(v, str) and v.strip() != ""
-
-
-def params_errors(params: dict) -> list[str]:
-    """The extension keys this package puts inside `params`, which ONCE
-    preserves but does not read: a non-blank `vpc_id` and a canonical
-    `vpc_ip_range`, the network every etcd, Patroni and firewall rule is
-    scoped to. A real run is refused without them; the legacy translation is
-    held to the same rule."""
-    errors: list[str] = []
-    if not _non_blank(params.get("vpc_id")):
-        errors.append("compute state carries no vpc_id")
-    if not _non_blank(params.get("vpc_ip_range")):
-        errors.append("compute state carries no vpc_ip_range")
-    elif not cluster.ipv4_network(params.get("vpc_ip_range")):
-        errors.append(f"compute state vpc_ip_range {json.dumps(params.get('vpc_ip_range'))}"
-                      " is not a canonical IPv4 network such as 10.40.0.0/24")
-    return errors
-
-
-def _checked(opts: dict) -> dict:
-    """`opts` once the adopted cluster passes `params_errors`, or the refusal."""
-    errors = params_errors(opts["once/cluster"]) if "once/cluster" in opts else []
-    return _refuse(opts, errors) if errors else opts
-
-
-def resolve_infrastructure(opts: dict, result: dict) -> dict:
-    """What the infrastructure stage hands on after its apply: `result` as it
-    is on a failure, a delete or a build, and otherwise ONCE's
-    `resolved_cluster` over the apply's `params` output — None outputs and a
-    partial cluster are refused there — checked against `params_errors`.
-    Pure, so the wiring is testable without an apply."""
-    if failed(result):
-        return result
-    if opts.get("blue/event") in ("delete", "build"):
-        return result
-    resolved = cluster.resolved_cluster(validate.spec, opts, result, {}, output_params(result))
-    return resolved if failed(resolved) else _checked(resolved)
-
-
-async def infrastructure_step(opts: dict) -> dict:
-    result = await tofu.tofu_with_spec(
-        opts, infrastructure_specs(opts),
-        dir=tool_dir(opts, infrastructure_tool),
-        env=credential_env(opts, "provider-compute"),
-        output_key="postgres-ha/outputs")
-    return resolve_infrastructure(opts, result)
-
-
-def legacy_params(opts: dict, outputs: dict) -> dict:
-    """A state written before this package recorded `params`: the parallel
-    `node_public_ips` and `node_private_ips` lists, zipped into the nodes the
-    standard describes, with `vpc_id` and `vpc_ip_range` copied and the names
-    this package has always given its nodes. Refused, as the SDK's
-    `StepError`, when the two lists disagree with each other or with
-    `cluster-nodes` — guessing which droplet is which is how a delete destroys
-    around a node — and when no `vpc_id` or `vpc_ip_range` was recorded. The
-    range's form is `params_errors`' to check, the same way for a legacy and
-    a recorded state."""
-    def as_list(v) -> list:
-        return list(v) if isinstance(v, (list, tuple)) else []
-
-    publics = as_list(outputs.get("node_public_ips"))
-    privates = as_list(outputs.get("node_private_ips"))
-    n = opts.get("cluster-nodes")
-    if not (n == len(publics) == len(privates)):
-        raise StepError(f"legacy state lists {len(publics)} public addresses and "
-                        f"{len(privates)} private addresses; refusing to guess the cluster")
-    for k in ("vpc_id", "vpc_ip_range"):
-        if not _non_blank(outputs.get(k)):
-            raise StepError(f"legacy state carries no {k}")
-    return {"provider": validate.default_compute_provider,
-            "vpc_id": outputs.get("vpc_id"),
-            "vpc_ip_range": outputs.get("vpc_ip_range"),
-            "nodes": [{"index": i,
-                       "role": None,
-                       "name": utils.node_name(opts, i + 1),
-                       "ip": publics[i],
-                       "vpc_ip": privates[i],
-                       "user": "root",
-                       "sudoer": "root"}
-                      for i in range(n)]}
-
-
-async def state_output(opts: dict) -> dict | None:
-    """The reader ONCE's `read_state` takes: the compute `params` recorded in
-    the infrastructure state, None when the state is readable and holds
-    nothing, and the legacy translation when it holds only the pre-adoption
-    outputs. Delete needs the cluster before it destroys anything — the local
-    SSH configuration is keyed by it — and a `plan` at that moment would be a
-    second chance to change infrastructure on the way to removing it; nor can
-    a fresh clone re-derive it, so the stage is rendered, its backend written
-    and initialized here, before the read. A failed initialization raises the
-    SDK's `StepError`, the shape `blue.tofu` raises on an unreadable backend;
-    `read_state` reports both fail-closed. Kept local, and looked up on this
-    module at call time, so tests can replace it."""
-    dir = tool_dir(opts, infrastructure_tool)
-    credentials = credential_env(opts, "provider-compute")
-    scaffold({**opts, "blue/event": "build"}, infrastructure_specs(opts))
-    backend_advice(infrastructure_tool)(opts)
-    init = await runtime.exec(
-        ["tofu", f"-chdir={dir}", "init", "-input=false", "-no-color"],
-        env=credentials)
-    if init.exit != 0:
-        raise StepError("infrastructure state initialization failed: "
-                        f"{init.err or init.out or '(no output)'}")
-    outputs = await tofu.outputs(dir, credentials)
-    if "params" in outputs:
-        return outputs["params"]
-    if not outputs:
-        return None
-    return legacy_params(opts, outputs)
-
-
-async def load_infrastructure_step(opts: dict) -> dict:
-    """Adopt the cluster out of remote state without planning or mutating
-    cloud resources: ONCE's `adopt_state` over the read `start_step` handed
-    on under `postgres-ha/state`, or a fresh read when nothing was. An
-    unreadable backend and a partial cluster fail closed; the adopted
-    `params` must then pass `params_errors`. A readable state without a
-    cluster means there is nothing to clean up on a delete."""
-    event = str(opts.get("blue/event"))
-    if "postgres-ha/state" in opts:
-        state = opts["postgres-ha/state"]
-    else:
-        state = await cluster.read_state(opts, state_output)
-    handed = {k: v for k, v in opts.items() if k != "postgres-ha/state"}
-    adopted = cluster.adopt_state(validate.spec, handed, event, state)
-    present = "once/cluster" in adopted
-    if failed(adopted):
-        return adopted
-    checked = _checked(adopted)
-    if failed(checked):
-        return checked
-    return {**checked, "postgres-ha/infrastructure-present?": present}
-
-
-# ---------------------------------------------------------------------------
-# Stage 2 — DNS
-#
-# One A record per node, all carrying `cluster-host`. libpq resolves the name
-# and tries every address it gets back, so a node that is down is skipped by
-# the client itself: the endpoint survives a failover without any DNS write,
-# and nothing has to hold a cloud API credential at the moment the cluster is
-# degraded. See plans/0001 for the alternative that was rejected.
+async def load_infrastructure_step(opts):
+    if opts.get('blue/event') == 'build' or opts.get('blue/dry-run'):
+        return await infrastructure_step(opts)
+    result = await read_deployment(opts)
+    if result['status'] == 'destroyed':
+        return {**opts, 'postgres-ha/already-destroyed': True, 'blue/exit': 0}
+    if result['status'] != 'present':
+        return _refuse(opts, ['compute state unavailable; legacy monolithic state requires explicit migration'])
+    handed = {**opts, 'colors-compute/cluster': result['cluster'], 'colors-compute/shared': result.get('shared', {}), 'postgres-ha/infrastructure-present?': True, 'blue/exit': 0}
+    path = result.get('key', {}).get('private_key_path')
+    if path:
+        handed['ssh-private-key-path'] = path
+    return handed
 
 
 def dns_data(opts: dict) -> dict:
@@ -338,14 +167,8 @@ async def dns_step(opts: dict) -> dict:
 # Shared render data
 
 
-def private_key_file(opts: dict) -> str:
-    """The private key every play and the acceptance script reach the nodes
-    with: the generated key's path in keygen mode (the build placeholder on a
-    build or a dry-run), the operator's `digitalocean-ssh-private-key` in
-    opt-out mode."""
-    if validate.keygen(opts):
-        return str(opts.get("ssh-private-key-path"))
-    return str(opts.get("digitalocean-ssh-private-key") or "")
+def private_key_file(opts):
+    return opts.get('ssh-private-key-path') or ''
 
 
 def data_fn(opts: dict) -> dict:
@@ -354,14 +177,18 @@ def data_fn(opts: dict) -> dict:
     mode owns."""
     opts = ssh.with_machine_key(opts)
     ns = nodes(opts)
-    recorded = opts.get("once/cluster") or {}
-    facts = {**fallback_outputs, **{k: recorded[k] for k in fallback_outputs if k in recorded}}
+    shared = opts.get('colors-compute/shared')
+    if shared is None and (opts.get('blue/event') == 'build' or opts.get('blue/dry-run')):
+        shared = plan_deployment(opts, compute.topology(opts), compute.requirements(opts)).get('shared', {})
+    facts = (shared or {}).get('params', {})
+    if not facts.get('network_cidr'):
+        raise ValueError('compute shared network CIDR unavailable')
     etcd_version = str(opts.get("etcd-version") or "")
     return {
         **opts,
         "nodes": ns,
         "first-node": ns[0],
-        "vpc-cidr": facts["vpc_ip_range"],
+        "vpc-cidr": facts["network_cidr"],
         "ssh-private-key": private_key_file(opts),
         "backup-r2-s3-endpoint": utils.endpoint_host(opts.get("backup-r2-endpoint")),
         "backup-repo-path": utils.repo_path(opts.get("backup-r2-prefix")),
@@ -386,8 +213,8 @@ def ansible_local_data(opts: dict) -> dict:
     reach the play as extra-vars instead, so the rendered playbook carries no
     IP and is identical on every workstation (SSH Config Standard §6)."""
     return {**data_fn(opts),
-            "ssh-keygen": validate.keygen(opts),
-            "ssh-config-identity-file": ssh_config.identity_file(opts),
+            "ssh-keygen": validate.keygen(opts) or bool(opts.get("ssh-private-key-path")),
+            "ssh-config-identity-file": ssh_config.identity_file(opts) if validate.keygen(opts) else opts.get("ssh-private-key-path", ""),
             "host-alias": ssh_config.host_alias(opts)}
 
 
@@ -402,10 +229,9 @@ def ansible_local_specs(opts: dict) -> list[dict]:
 
 
 def ssh_config_hosts(opts: dict) -> list[dict]:
-    """The `~/.ssh/config` entries, as data the play loops over: the bare
-    profile pointing at node 0 (the spec's entry), then one alias per node.
-    ONCE's (Compute Cluster Standard §6)."""
-    return cluster.ssh_config_hosts(validate.spec, opts, _cluster_nodes(opts))
+    """Application facts derived from the shared compute library."""
+    ns = _cluster_nodes(opts)
+    return [{**ns[0], 'name': opts['profile']}, *[{**node, 'name': opts['profile'] + '-' + node['node_id']} for node in ns]]
 
 
 def ansible_local_extra_vars(opts: dict) -> dict:
@@ -491,7 +317,7 @@ def inventory(opts: dict) -> str:
     data = data_fn(opts)
     hosts = {node["name"]: {
         "ansible_host": node["public-ip"],
-        "ansible_user": "root",
+        "ansible_user": node["user"],
         "private_ip": node["private-ip"],
         "node_ordinal": node["ordinal"],
     } for node in sorted(data["nodes"], key=lambda node: node["name"])}

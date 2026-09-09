@@ -1,6 +1,6 @@
 ---
 name: package-postgres-ha-green
-description: Provision and operate a three-node PostgreSQL failover cluster on DigitalOcean with Patroni, etcd, HAProxy, Cloudflare DNS, and pgBackRest point-in-time recovery to Cloudflare R2, using Green.
+description: Provision and operate a three-node PostgreSQL failover cluster with Patroni, etcd, HAProxy, Cloudflare DNS, and pgBackRest point-in-time recovery to Cloudflare R2, using Green.
 license: MIT
 ---
 
@@ -30,8 +30,8 @@ verified restore that runs on a schedule.
 - Run `build` and `create --dry-run` before any real lifecycle operation. Both
   work with an empty environment.
 - The Patroni REST API and etcd have no authentication and are protected by the
-  VPC firewall alone. Widening `digitalocean-ssh-sources` or
-  `digitalocean-client-sources`, or exposing those ports, is a security change.
+  VPC firewall alone. Widening `postgres-ssh-sources` or
+  `postgres-client-sources`, or exposing those ports, is a security change.
 
 ## Commands
 
@@ -60,11 +60,17 @@ for node 1 and `Host <profile>-0`, `<profile>-1`, `<profile>-2` for each node
 which node to dispatch through (`--node 2` is `<profile>-1`); use a live one
 when the cluster is degraded.
 
-The deployment owns its SSH keypair (keygen mode: leave `digitalocean-ssh-keys`
-out of `colors.yml`; the first real `create` generates `~/.ssh/<profile>`,
-registers it at DigitalOcean and names it in the block, and `delete` removes
-it last). Supplying `digitalocean-ssh-keys` and `digitalocean-ssh-private-key`
-opts out and uses your own key untouched.
+Compute, SSH keys, and remote state are supplied by the pinned
+[colors-compute library](https://github.com/getcolors/colors-compute). Select a
+provider supported by that revision and configure its options and credentials.
+The package supplies three peer nodes and application network requirements;
+the library joins observed node addresses and SSH users for Ansible.
+
+Use `provider-backend: r2` or `s3`. R2 requires
+`COLORS_PAR_R2_ACCESS_KEY_ID` and `COLORS_PAR_R2_SECRET_ACCESS_KEY`; S3 uses
+the ambient AWS credential chain. The library owns managed profile keys, or
+uses configured external keys with `ssh-private-key-path`. Existing monolithic
+compute state requires explicit migration and is refused by this lifecycle.
 
 ## Connecting
 

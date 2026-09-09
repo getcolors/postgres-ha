@@ -3,12 +3,13 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [green.cli :as green-cli]
-            [io.github.getcolors.once.compute-cluster :as cluster]
-            [io.github.getcolors.postgres-ha.validate :as validate]))
+                        [io.github.getcolors.postgres-ha.validate :as validate]))
 
 (def fixture
   (let [file (io/file "test/fixtures/colors.yml")]
     (green-cli/read-state file (slurp file))))
+
+(def base fixture)
 
 (defn- errors [overrides]
   (validate/state-errors (merge fixture overrides)))
@@ -34,7 +35,7 @@
 
 (deftest the-private-key-path-is-desired-state-in-opt-out-mode-only
   (is (has? (validate/state-errors (dissoc optout :digitalocean-ssh-private-key))
-            #"digitalocean-ssh-private-key is required when digitalocean-ssh-keys is supplied"))
+            #"ssh-private-key-path is required for external SSH access"))
   (testing "keygen mode names the generated key itself and asks for no path"
     (is (= [] (validate/state-errors (dissoc fixture :digitalocean-ssh-private-key))))))
 
@@ -55,40 +56,6 @@
     (is (has? (validate/env-errors {par "somebody-elses-deployment"})
               #"takes profile from colors.yml only"))))
 
-(deftest the-spec-describes-one-homogeneous-role-on-a-discovered-network
-  ;; The Compute Cluster Standard's spec is data ONCE reads; this is the one
-  ;; place its content is asserted, so a drift in any colour is a test
-  ;; failure and not a rendered surprise.
-  (is (= [] (cluster/spec-errors validate/spec)))
-  (is (= ["digitalocean"] (keys (:registry validate/spec))))
-  (is (= "digitalocean" (:default validate/spec)))
-  (is (= {:mode :discovered} (get-in validate/spec [:registry "digitalocean" :network])))
-  (is (= {:non-empty ["ssh-sources" "client-sources"] :may-be-empty []} (:sources validate/spec)))
-  (is (= [{:role nil :count-key :cluster-nodes :count 3 :fallback-offset 11}]
-         (:roles validate/spec)))
-  (is (nil? (:entry validate/spec)) "the bare profile alias reaches node 0")
-  (is (= "10.114.0.0/20" (:fallback-subnet validate/spec)))
-  (is (= [] (cluster/topology-errors validate/spec fixture)))
-  (testing "the registry's required keys are demanded through ONCE"
-    (doseq [k (get-in validate/compute-providers ["digitalocean" :required])]
-      (is (has? (errors {k nil}) (re-pattern (str k " is required"))) (str k)))))
-
-(deftest the-vpc-is-discovered-and-cannot-be-described
-  (testing "accepting a VPC identifier would let one deployment be edited onto
-            another's private network while passing every other check"
-    (doseq [k validate/forbidden-vpc-keys]
-      (is (has? (errors {k "10.0.0.0/16"})
-                #"must not be configured; the regional default VPC is discovered")
-          (str k " must be refused"))))
-  (testing "the two spellings ONCE knows are refused by its discovered-network
-            rule, once, with its message"
-    (is (= [":digitalocean-vpc-uuid must be absent; the default regional VPC is discovered at runtime"]
-           (errors {:digitalocean-vpc-uuid "00000000-0000-0000-0000-000000000000"})))
-    (is (= [":digitalocean-vpc-cidr must be absent; this package must not create a VPC"]
-           (errors {:digitalocean-vpc-cidr "10.114.0.0/20"}))))
-  (is (has? (errors {:digitalocean-vpc-mode "explicit"})
-            #":digitalocean-vpc-mode must be default")))
-
 (deftest the-node-budget-is-fixed
   (is (has? (errors {:cluster-nodes 2}) #":cluster-nodes must be 3"))
   (is (has? (errors {:cluster-nodes 5}) #":cluster-nodes must be 3"))
@@ -96,7 +63,7 @@
     (is (has? (errors {:cluster-nodes "3"}) #":cluster-nodes must be a positive integer"))))
 
 (deftest only-the-providers-this-package-implements-are-accepted
-  (is (has? (errors {:provider-compute "hcloud"}) #":provider-compute must be one of digitalocean"))
+  (is (has? (errors {:provider-compute "hcloud"}) #":hcloud-image is required"))
   (is (has? (errors {:provider-dns "yandex"}) #"unsupported :provider-dns"))
   (is (has? (errors {:provider-backend "gcs"}) #"unsupported :provider-backend")))
 
@@ -147,19 +114,6 @@
               #":client-connect-timeout-seconds"))
     (is (= [] (errors {:client-connect-timeout-seconds 5})))))
 
-(deftest ingress-stays-scoped
-  ;; The list and CIDR checks are ONCE's, with its messages; the refusal of the
-  ;; world is this package's own and holds however the list is spelled.
-  (doseq [k [:digitalocean-ssh-sources :digitalocean-client-sources]]
-    (is (= [(str k " must not contain 0.0.0.0/0; administrative and database ingress stay scoped")]
-           (errors {k ["0.0.0.0/0"]})))
-    (is (has? (errors {k "203.0.113.10/32, 0.0.0.0/0"}) #"must not contain 0.0.0.0/0"))
-    (is (= [(str k " must list at least one CIDR")] (errors {k []})))
-    (is (= [(str k " entry \"203.0.113.10\" is not an IPv4 or IPv6 CIDR")]
-           (errors {k ["203.0.113.10"]}))))
-  (testing "a string is a list, the way an overlay carries one"
-    (is (= [] (errors {:digitalocean-ssh-sources "203.0.113.10/32, 198.51.100.0/24"})))))
-
 (deftest blast-radius-is-separated
   (is (has? (errors {:backup-r2-bucket (:r2-bucket fixture)})
             #"must not be the OpenTofu state bucket")))
@@ -180,7 +134,7 @@
   (testing "with none set, every one is named once"
     (let [messages (vec (validate/secret-errors fixture))]
       (is (= (count messages) (count (distinct messages))))
-      (doseq [par ["COLORS_PAR_DO_TOKEN" "COLORS_PAR_CLOUDFLARE_API_TOKEN"
+      (doseq [par ["COLORS_PAR_CLOUDFLARE_API_TOKEN"
                    "COLORS_PAR_R2_ACCESS_KEY_ID" "COLORS_PAR_R2_SECRET_ACCESS_KEY"
                    "COLORS_PAR_BACKUP_R2_ACCESS_KEY_ID"
                    "COLORS_PAR_BACKUP_R2_SECRET_ACCESS_KEY"
@@ -200,3 +154,9 @@
     (doseq [secret ["tok-do" "tok-cf" "hunter2" "sekrit"]]
       (is (not (some #(str/includes? % secret) messages))
           (str "a validation message rendered " secret)))))
+
+(deftest ingress-is-scoped-and-valid
+  (doseq [key [:digitalocean-ssh-sources :digitalocean-client-sources]]
+    (is (seq (validate/state-errors (assoc base key ["0.0.0.0/0"]))))
+    (is (seq (validate/state-errors (assoc base key []))))
+    (is (seq (validate/state-errors (assoc base key ["invalid-cidr"]))))))

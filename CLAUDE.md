@@ -48,10 +48,10 @@ fixture (no `digitalocean-ssh-keys`: the package owns the keypair) and
 `test/fixtures/optout.yml` is the opt-out fixture (an explicit key id: the
 package touches no key material and renders byte-for-byte what it rendered
 before the SSH Keypair Standard, under its own profile). Each is rendered
-under the **r2** state backend it declares and again under **local**,
+under the **r2** state backend it declares and again under **s3**,
 produced by overlaying `COLORS_PAR_PROVIDER_BACKEND` on the same file. The
 four committed trees live at
-`test/resources/golden/{local,r2}/postgres-ha-{fixture,optout}/`; the backend
+`test/resources/golden/{s3,r2}/postgres-ha-{fixture,optout}/`; the backend
 pair differs only in each OpenTofu stage's `backend.tf.json`.
 
 Operator verbs dispatch over SSH through the aliases the local stage manages:
@@ -101,55 +101,27 @@ the cluster is degraded.
 
 ## Coupling
 
-The package pins the SDK — Green in `green/deps.edn`, the Red SDK in
-`red/package.json`, the Blue SDK in `blue/pyproject.toml` — and ONCE, in the
-same three manifests and in the red payload's `PINS`, for two namespaces:
-`compute-cluster` (`io.github.getcolors.once.compute-cluster`,
-`package-once-red`'s `computeCluster`, `package_once_blue.compute_cluster`),
-the one implementation of the Compute Cluster Standard
-(`workspace/standards/compute-cluster.md`), and `ssh`
-(`io.github.getcolors.once.ssh`, ONCE's unexported `red/src/ssh.ts` reached
-through `red/src/once.ts`, `package_once_blue.ssh`), the reference
-implementation of the SSH Keypair Standard (`workspace/standards/ssh-keypair.md`).
-The package's `ssh` module wraps ONCE's with the build placeholder; its
-`ssh_config` module and its `ansible-local` play are its own copies of the
-multi-node shape every DB package carries (`workspace/standards/ssh-config.md`
-§7; `workspace/scripts/package-copies.py` gates the copies). Keygen mode is
-the absence of `digitalocean-ssh-keys`; `digitalocean-ssh-private-key` is
-required in opt-out mode only. On a real create the keypair matrix and the
-DigitalOcean key preflight run in `start-step` before anything renders; the
-keypair is removed last on delete, after the destroy. The goldens have two
-fixtures, `test/fixtures/colors.yml` (keygen) and `test/fixtures/optout.yml`
-(opt-out, byte-for-byte the pre-standard rendering under its own profile),
-each under both state backends.
-The package owns its provider registry, its OpenTofu templates and its stage
-names; its `compute-providers` registry and `spec` (one homogeneous role of
-`cluster-nodes` nodes, fallback offset 11, the `10.114.0.0/20` fallback
-subnet, a discovered network), its own validators — the fixed node count, the
-`default` VPC mode, the `0.0.0.0/0` refusal on both source lists — and its
-`params-errors`; ONCE owns selection, the source lists, the network and
-topology checks, the fallback nodes, the aliases, `read-state`,
-`adopt-state`, `resolved-cluster` and the provider-switch guard. The compute
-state is the template's `params` output — `provider`, `vpc_id`,
-`vpc_ip_range`, and one node per droplet — adopted under `:once/cluster`; a
-pre-adoption state, which recorded only the parallel
-`node_public_ips`/`node_private_ips` lists, is translated into the same shape
-by the reader in `tools`, and refused when the lists disagree. The
-`~/.ssh/config` block is the SSH Config Standard's: one block marked with the
-profile, `Host <profile>` for node 1 and `<profile>-<index>` per node, with
-the `IdentityFile` pair in keygen mode; the one-cycle removal of the
-pre-standard per-node blocks has run its cycle and is gone. Develop
-across the boundary with `GREEN_LIB_ROOT`, `ONCE_LIB_ROOT` and
-`POSTGRES_HA_LIB_ROOT` (the repository root, for every colour; red also
-accepts the `red/` dir directly); a change spanning two repositories is two
-commits, the upstream pushed first. Final launcher pins are stamped only by
-`bb pin` (in `green/`), which stamps all three payloads from their unpinned
-birth forms after a clean pushed commit. Never invent or hand-edit a SHA.
+Every color depends on the pinned colors-compute library for compute, remote
+state, provider credentials, SSH keys, topology expansion, and lifecycle
+ownership. The package declares three homogeneous peers and application network
+requirements. Colors fans out the same library node operation, then joins
+complete observed outputs for Ansible and DNS. ONCE remains only for application
+DNS helpers and its separate backend credential binding.
 
-A deployment's root `./green` (or `./red`, `./blue`) is a **copy** of
-`skills/package-postgres-ha-<colour>/<colour>`, not a symlink. Inside this
-repository each colour dir's launcher *is* the symlink, which is what
-`scripts/launcher.sh` asserts.
+Provider templates and registries belong to the library. Supporting another
+compatible provider requires a dependency bump, without application source or
+provider fixture changes. Build and dry-run use documentation addresses and a
+placeholder home without reading local keys. Real operations validate remote
+ownership before generating keys or invoking a compute provider. Existing
+monolithic compute state requires an explicit migration; it is never silently
+adopted. Local SSH config plays remain package-owned and use observed SSH users
+and the selected identity path.
+
+Manifests and lockfiles pin published dependencies. Publish package source before
+running `bb pin` in `green/`, then publish the stamped launcher copies. Red
+launchers resolve compute and SDK transitively through the pinned package;
+repeating these Git dependencies breaks cold installation in Bun 1.3.13.
+
 
 ## Documentation
 

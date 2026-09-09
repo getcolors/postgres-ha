@@ -18,7 +18,7 @@
             [green.lifecycle :as lifecycle]
             [green.progress :as progress]
             [green.workflow :as wf]
-            [io.github.getcolors.once.compute-cluster :as cluster]
+            [io.github.getcolors.compute-inspection :as inspection]
             [io.github.getcolors.postgres-ha.ssh :as ssh]
             [io.github.getcolors.postgres-ha.ssh-config :as ssh-config]
             [io.github.getcolors.postgres-ha.tools :as tools]
@@ -63,63 +63,21 @@
   (boolean (and real? (lifecycle-events event))))
 
 (defn start-step
-  "Preflight. On a real create or delete the compute state is read once
-  through `reader` — the package's `tools/state-output` unless a test injects
-  another — on the same defaulted and overlaid opts the validators see, and
-  only once desired state itself has passed, so the reader never renders an
-  invalid colors.yml. The read feeds the switch guard here and travels on
-  under `:postgres-ha/state` for `load-infrastructure` to adopt.
-
-  Credentials are only demanded by a run that will actually use them. `build`
-  and `--dry-run` therefore work on a fresh checkout with an empty
-  environment, which is what makes them a safe way to review a colors.yml
-  edit."
   ([opts] (start-step opts (System/getenv)))
-  ([opts env] (start-step opts env tools/state-output))
-  ([opts env reader]
-   (let [overlaid (green-cli/read-pars (merge defaults opts) env)
-         context {:event (:green/event overlaid) :real? (lifecycle/real-run? overlaid)}
-         state (when (and (real-lifecycle-event? context)
-                          (empty? (validate/env-errors env))
-                          (empty? (validate/state-errors overlaid)))
-                 (cluster/read-state overlaid reader))]
-     (lifecycle/preflight
-      opts
-      {:defaults defaults
-       :overlay green-cli/read-pars
-       :validators
-       [(fn [_ env _] (validate/env-errors env))
-        (fn [opts _ _] (validate/state-errors opts))
-        ;; Standard §4 before the credentials: a recorded provider that differs
-        ;; from the selected one reports the actionable error, not a missing
-        ;; token for the provider that was just selected.
-        (fn [opts _ ctx]
-          (when (real-lifecycle-event? ctx)
-            (cluster/provider-validator validate/spec opts (:params state)
-                                        #(validate/secret-errors opts))))
-        (fn [opts _ {:keys [event real?]}]
-          (when (and real? (= :delete event) (:compute-prevent-destroy opts))
-            [(str "compute destruction is protected; set "
-                  (green-cli/par-name :compute-prevent-destroy)
-                  "=false for this one delete")]))]
-       :after-validate
-       ;; The machine key's create matrix and the DigitalOcean preflight run
-       ;; before any template is rendered: an unowned key on disk or at the
-       ;; provider stops the run while stopping is still free. Every other
-       ;; event fills the same template values — a destroy renders before it
-       ;; destroys — but checks no key, because the delete's key cleanup runs
-       ;; after the compute destroy.
-       (fn [opts _ {:keys [event real?] :as ctx}]
-         (let [opts (cond-> opts (real-lifecycle-event? ctx) (assoc :postgres-ha/state state))]
-           (if (and real? (= :create event))
-             (let [opts (ssh/ensure-key! opts (fn [_] (:params state)))]
-               (if (wf/failed? opts)
-                 opts
-                 (let [opts (ssh/preflight! (ssh/with-machine-key opts))
-                       opts (if (wf/failed? opts) opts (ssh-config/preflight! opts))]
-                   (if (wf/failed? opts) opts (assoc opts :green/exit 0)))))
-             (assoc (ssh/with-machine-key opts) :green/exit 0))))}
-      env))))
+  ([opts env] (start-step opts env nil))
+  ([opts env _]
+   (lifecycle/preflight opts
+     {:defaults defaults :overlay green-cli/read-pars
+      :validators [(fn [_ env _] (validate/env-errors env))
+                   (fn [opts _ _] (validate/state-errors opts))
+                   (fn [opts _ ctx]
+                     (when (and (real-lifecycle-event? ctx) (empty? (validate/state-errors opts))) (validate/secret-errors opts)))
+                   (fn [opts _ {:keys [event real?]}]
+                     (when (and real? (= :delete event) (:compute-prevent-destroy opts))
+                       ["compute destruction is protected; set COLORS_PAR_COMPUTE_PREVENT_DESTROY=false for this one delete"]))]
+      :after-validate (fn [opts _ {:keys [event real?]}]
+                        (if (and real? (= :create event)) (ssh-config/preflight! opts)
+                            (assoc (ssh/with-machine-key opts) :green/exit 0)))} env)))
 
 (defn wire-fn
   [step run-opts]
@@ -134,8 +92,7 @@
       ;; The keypair goes after the compute destroy (ssh-keypair.md §3.3): a
       ;; key that predeceases its hosts locks the operator out of nodes that
       ;; still exist.
-      :postgres-ha/infrastructure [tools/infrastructure-step :postgres-ha/ssh-cleanup]
-      :postgres-ha/ssh-cleanup [ssh/cleanup-step :postgres-ha/generated-cleanup]
+      :postgres-ha/infrastructure [tools/infrastructure-step :postgres-ha/generated-cleanup]
       :postgres-ha/generated-cleanup [tools/generated-cleanup-step])
     (case step
       :postgres-ha/start [start-step :postgres-ha/infrastructure]
@@ -157,11 +114,10 @@
    :postgres-ha/acceptance :postgres-ha/ssh-cleanup :postgres-ha/generated-cleanup])
 
 (def workflow
-  (-> (wf/workflow {:start :postgres-ha/start :wire-fn wire-fn})
-      (wf/advice-add :postgres-ha/load-infrastructure :before ::backend
-                     (backend-advice tools/infrastructure-tool))
-      (wf/advice-add :postgres-ha/infrastructure :before ::backend
-                     (backend-advice tools/infrastructure-tool))
+  (-> (wf/workflow {:start :postgres-ha/start :wire-fn wire-fn
+                    :next-fn (fn [_ successors opts]
+                               (if (or (:postgres-ha/already-destroyed opts) (wf/failed? opts)) []
+                                   (mapv #(vector % opts) successors)))})
       (wf/advice-add :postgres-ha/dns :before ::backend
                      (backend-advice tools/dns-tool))
       progress/advise

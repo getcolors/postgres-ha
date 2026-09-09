@@ -1,9 +1,10 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["package-postgres-ha-blue", "blue"]
+# dependencies = ["package-postgres-ha-blue", "blue", "colors-compute-blue"]
 #
 # [tool.uv.sources]
+# colors-compute-blue = { git = "https://github.com/getcolors/colors-compute.git", rev = "85bf076dfe2c34025dc9362f1cc4c5bc92a4373d", subdirectory = "blue" }
 # package-postgres-ha-blue = { git = "https://github.com/getcolors/postgres-ha.git", rev = "828f430b318def47eaea6ce7bf539260040fa96d", subdirectory = "blue" }
 # blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
 #

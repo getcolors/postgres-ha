@@ -16,9 +16,7 @@ def test_a_build_never_names_the_operators_home():
     opts = ssh.with_machine_key(fixture({"blue/event": "build"}))
     assert opts["ssh-private-key-path"] == "/home/build-placeholder/.ssh/postgres-ha-fixture"
     assert opts["ssh-public-key-path"] == "/home/build-placeholder/.ssh/postgres-ha-fixture.pub"
-    # The placeholder lands on the provider's own machine-key key.
-    assert opts["digitalocean-ssh-keys"] == "/home/build-placeholder/.ssh/postgres-ha-fixture.pub"
-    assert "build-placeholder" not in str(os.environ.get("HOME"))
+    assert 'digitalocean-ssh-keys' not in opts
 
 
 def test_a_dry_run_is_held_to_the_same_rule_as_a_build():
@@ -31,10 +29,11 @@ def test_a_dry_run_is_held_to_the_same_rule_as_a_build():
         "ssh-private-key-path"] == "/home/build-placeholder/.ssh/postgres-ha-fixture"
 
 
-def test_real_events_render_the_real_path():
-    opts = ssh.with_machine_key(fixture({"blue/event": "health"}))
-    assert "build-placeholder" not in opts["ssh-private-key-path"]
-    assert opts["ssh-private-key-path"].endswith("/.ssh/postgres-ha-fixture")
+def test_real_events_use_only_recorded_identity_paths():
+    opts = ssh.with_machine_key(fixture({'blue/event': 'create'}))
+    assert 'ssh-private-key-path' not in opts
+    opts = ssh.with_machine_key(fixture({'blue/event': 'create', 'ssh-private-key-path': '/tmp/owned'}))
+    assert opts['ssh-private-key-path'] == '/tmp/owned'
 
 
 def test_opt_out_opts_pass_through_untouched():

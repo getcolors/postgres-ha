@@ -1,0 +1,158 @@
+{
+  "data": {
+    "digitalocean_vpc": {
+      "network": {
+        "region": "ams3"
+      }
+    }
+  },
+  "locals": {
+    "private_ingress": {
+      "ping:private": {
+        "protocol": "icmp"
+      },
+      "private-tcp:private": {
+        "port_range": "1-65535",
+        "protocol": "tcp"
+      },
+      "private-udp:private": {
+        "port_range": "1-65535",
+        "protocol": "udp"
+      }
+    },
+    "public_ingress": {
+      "ping:203.0.113.10/32": {
+        "protocol": "icmp",
+        "source_addresses": [
+          "203.0.113.10/32"
+        ]
+      },
+      "primary:203.0.113.10/32": {
+        "port_range": "5432",
+        "protocol": "tcp",
+        "source_addresses": [
+          "203.0.113.10/32"
+        ]
+      },
+      "replica:203.0.113.10/32": {
+        "port_range": "5433",
+        "protocol": "tcp",
+        "source_addresses": [
+          "203.0.113.10/32"
+        ]
+      },
+      "ssh:203.0.113.10/32": {
+        "port_range": "22",
+        "protocol": "tcp",
+        "source_addresses": [
+          "203.0.113.10/32"
+        ]
+      }
+    }
+  },
+  "output": {
+    "params": {
+      "value": {
+        "deployment_tag": "${digitalocean_tag.deployment.name}",
+        "endpoint_ip": "${try(digitalocean_reserved_ip.endpoint[0].ip_address, null)}",
+        "firewall_id": "${digitalocean_firewall.network.id}",
+        "network_cidr": "${data.digitalocean_vpc.network.ip_range}",
+        "provider": "digitalocean",
+        "vpc_id": "${data.digitalocean_vpc.network.id}",
+        "vpc_ip_range": "${data.digitalocean_vpc.network.ip_range}"
+      }
+    }
+  },
+  "provider": {
+    "digitalocean": {}
+  },
+  "resource": {
+    "digitalocean_firewall": {
+      "network": {
+        "dynamic": {
+          "inbound_rule": [
+            {
+              "content": {
+                "port_range": "${try(inbound_rule.value.port_range, null)}",
+                "protocol": "${inbound_rule.value.protocol}",
+                "source_addresses": "${inbound_rule.value.source_addresses}"
+              },
+              "for_each": "${local.public_ingress}"
+            },
+            {
+              "content": {
+                "port_range": "${try(inbound_rule.value.port_range, null)}",
+                "protocol": "${inbound_rule.value.protocol}",
+                "source_addresses": [
+                  "${data.digitalocean_vpc.network.ip_range}"
+                ]
+              },
+              "for_each": "${local.private_ingress}"
+            }
+          ]
+        },
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "name": "postgres-ha-optout-firewall",
+        "outbound_rule": [
+          {
+            "destination_addresses": [
+              "0.0.0.0/0",
+              "::/0"
+            ],
+            "port_range": "1-65535",
+            "protocol": "tcp"
+          },
+          {
+            "destination_addresses": [
+              "0.0.0.0/0",
+              "::/0"
+            ],
+            "port_range": "1-65535",
+            "protocol": "udp"
+          },
+          {
+            "destination_addresses": [
+              "0.0.0.0/0",
+              "::/0"
+            ],
+            "protocol": "icmp"
+          }
+        ],
+        "tags": [
+          "${digitalocean_tag.deployment.name}"
+        ]
+      }
+    },
+    "digitalocean_reserved_ip": {
+      "endpoint": {
+        "count": 0,
+        "lifecycle": {
+          "ignore_changes": [
+            "droplet_id"
+          ],
+          "prevent_destroy": true
+        },
+        "region": "ams3"
+      }
+    },
+    "digitalocean_tag": {
+      "deployment": {
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "name": "colors-compute-postgres-ha-optout"
+      }
+    }
+  },
+  "terraform": {
+    "required_providers": {
+      "digitalocean": {
+        "source": "digitalocean/digitalocean",
+        "version": "2.51.0"
+      }
+    },
+    "required_version": ">= 1.8.0"
+  }
+}

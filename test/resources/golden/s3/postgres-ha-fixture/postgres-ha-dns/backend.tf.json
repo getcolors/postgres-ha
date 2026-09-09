@@ -1,0 +1,11 @@
+{
+  "terraform" : {
+    "backend" : {
+      "s3" : {
+        "bucket" : "fixture-state",
+        "key" : "postgres-ha-fixture/postgres-ha-dns.tfstate",
+        "region" : "eu-west-1"
+      }
+    }
+  }
+}

@@ -1,15 +1,7 @@
 {:paths ["src/clj" "src/resources"]
- :deps {org.clojure/clojure {:mvn/version "1.12.5"}
-        ;; The two pins move together. Green 3f33f5d is where the SDK reports a
-        ;; tofu launch failure — a missing stage directory, a missing binary —
-        ;; as exit 127 and so as its `tofu output failed:` step error carrying
-        ;; :dir, which is the one shape ONCE's `read-state` counts as an
-        ;; unreadable state; below it a fresh clone's create crashes instead of
-        ;; reporting its credentials. ONCE b1628b7 carries the `compute-cluster`
-        ;; namespace this package delegates to (landed in f8815a4); the ONCE
-        ;; pin cannot go below it. This package still owns its provider
-        ;; registry, its OpenTofu templates and its stage names: what it takes
-        ;; from ONCE is the Compute Cluster Standard's operations over them.
+ :deps {io.github.getcolors/colors-compute {:git/url "https://github.com/getcolors/colors-compute.git" :git/sha "85bf076dfe2c34025dc9362f1cc4c5bc92a4373d" :deps/root "green"}
+        org.clojure/clojure {:mvn/version "1.12.5"}
+        ;; ONCE remains for application DNS helpers.
         io.github.getcolors/green {:git/url "https://github.com/getcolors/green.git"
                                    :git/sha "3f33f5d4dcce1f8d97a11b6972e13eb3f0b37654"}
         io.github.getcolors/once {:git/url "https://github.com/getcolors/once.git"

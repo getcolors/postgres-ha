@@ -24,7 +24,7 @@
     # Discovered from the regional default VPC by the infrastructure stage and
     # threaded through here, so pg_hba admits exactly this deployment's private
     # network and nothing wider.
-    vpc_cidr: "10.114.0.0/20"
+    vpc_cidr: "10.0.0.0/24"
     # Patroni's own vocabulary, taken from its REST API rather than assumed.
     # A leader reports state `running`; a healthy standby reports `streaming`,
     # and with synchronous mode on its role is `sync_standby`, not `replica`.

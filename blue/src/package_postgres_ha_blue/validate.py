@@ -1,23 +1,4 @@
-"""Credential-free desired-state validation, and the provider registry it
-uses — the port of io.github.getcolors.postgres-ha.validate.
-
-The compute registry is package-owned — this package provisions three
-droplets, its own firewall and its own DNS record set, so the keys a stage
-interpolates are not ONCE's single-server keys — and the operations over it
-are ONCE's ``compute_cluster`` module, the one implementation of the Compute
-Cluster Standard: selection, the required keys, the source lists, the
-provider rules, the network mode and the topology are checked there over
-``spec``, never copied here. What stays here is what only this package knows:
-the fixed node count, the discovered VPC, the scoped ingress, and every
-PostgreSQL, Patroni, etcd, HAProxy and pgBackRest rule.
-
-Green renders its keys as Clojure keywords, so every message here carries the
-same leading colon — the three colours must report identical errors for one
-colors.yml.
-
-Every check accumulates. A run reports all of a file's problems at once with
-exit 2, because fixing desired state one error per invocation is how a person
-gives up on a config file."""
+"""Application facts derived from the shared compute library."""
 
 from __future__ import annotations
 
@@ -25,54 +6,16 @@ import json
 import re
 
 from blue.cli import par_name
-from package_once_blue import compute as once_compute
-from package_once_blue import compute_cluster as cluster
-from package_once_blue import ssh as once_ssh
+from colors_compute import validate as compute_validate
+from colors_compute.contract import registry
+from colors_compute.planning import plan_deployment
+from colors_compute.ssh import _mode
+from colors_compute.deployment_request import source_cidrs
+from . import compute, utils
 
-from . import utils
+compute_providers = registry()['compute']
+default_compute_provider = 'digitalocean'
 
-# provider-compute -> what that choice implies.
-#
-# `required` are non-secret keys the template interpolates. `secrets` arrive
-# only through `COLORS_PAR_*`. `tofu-env` is the subset OpenTofu reads
-# natively from the process environment, so a credential never has to be
-# rendered into a .tf file sitting in the work directory in plaintext.
-# `network` is discovered: the region's default VPC, never one this package
-# owns. `digitalocean-ssh-keys` is deliberately absent from `required`: per the
-# SSH Keypair Standard its absence selects keygen mode, and its presence is the
-# opt-out that passes the operator's key ids through untouched.
-compute_providers = {
-    "digitalocean": {
-        "required": ["digitalocean-name", "digitalocean-region", "digitalocean-size",
-                     "digitalocean-image", "digitalocean-ssh-sources",
-                     "digitalocean-client-sources", "digitalocean-vpc-mode"],
-        "secrets": ["do-token"],
-        "tofu-env": {"do-token": "DIGITALOCEAN_TOKEN"},
-        "network": {"mode": "discovered"},
-    },
-}
-
-# The provider a deployment created before this package recorded one in its
-# compute output must be running: the only one it ever offered.
-default_compute_provider = "digitalocean"
-
-# How this package describes itself to ONCE's `compute_cluster`. One
-# homogeneous role of `cluster-nodes` members, whose fallback addresses start
-# at offset 11 so that `build` renders the same 192.0.2.11-13 and
-# 10.114.0.11-13 it always did. The fallback subnet stands in for the
-# discovered VPC's range on a build; on a real run the range is the compute
-# state's `vpc_ip_range`.
-spec: cluster.ClusterSpec = {
-    "registry": compute_providers,
-    "default": default_compute_provider,
-    "sources": {"non_empty": ["ssh-sources", "client-sources"], "may_be_empty": []},
-    "roles": [{"role": None, "count_key": "cluster-nodes", "count": 3, "fallback_offset": 11}],
-    "fallback_subnet": "10.114.0.0/20",
-}
-
-# Provider slot -> provider name -> what that choice implies. The compute slot
-# is the registry above, so the OpenTofu environment and the secrets are read
-# from one place whichever slot a stage asks for.
 providers = {
     "provider-compute": compute_providers,
 
@@ -85,30 +28,11 @@ providers = {
         },
     },
 
-    "provider-backend": {
-        "local": {"required": [], "secrets": [], "tofu-env": {}},
-        "s3": {
-            "required": ["s3-bucket", "s3-region"],
-            "secrets": ["s3-access-key-id", "s3-secret-access-key"],
-            "tofu-env": {"s3-access-key-id": "AWS_ACCESS_KEY_ID",
-                         "s3-secret-access-key": "AWS_SECRET_ACCESS_KEY"},
-        },
-        # R2 is S3-compatible and therefore authenticates through the AWS
-        # chain. These are the *state* credentials; the backup repository has
-        # its own pair so a leaked backup key cannot rewrite infrastructure
-        # state.
-        "r2": {
-            "required": ["r2-bucket", "r2-endpoint"],
-            "secrets": ["r2-access-key-id", "r2-secret-access-key"],
-            "tofu-env": {"r2-access-key-id": "AWS_ACCESS_KEY_ID",
-                         "r2-secret-access-key": "AWS_SECRET_ACCESS_KEY"},
-        },
-    },
+    "provider-backend": registry()['backend'],
 }
 
 slots = ["provider-compute", "provider-dns", "provider-backend"]
 
-# The slots this package selects and checks itself; the compute slot is ONCE's.
 own_slots = ["provider-dns", "provider-backend"]
 
 profile_par = par_name("profile")
@@ -134,26 +58,13 @@ own_secrets = [
     "backup-r2-access-key-id", "backup-r2-secret-access-key",
 ]
 
-# A VPC is discovered, never described. Accepting any of these would let one
-# deployment place its nodes on another's network while still passing every
-# other check, so their mere presence is an error rather than a warning.
-# `digitalocean-vpc-uuid` and `digitalocean-vpc-cidr` are refused by ONCE's
-# discovered-network rule with its own message; these are the spellings only
-# this package refuses.
-forbidden_vpc_keys = [
-    "digitalocean-vpc-id", "digitalocean-vpc-name", "digitalocean-vpc",
-]
-
-
 def placeholder(x) -> bool:
     return x is None or (isinstance(x, str) and (not x.strip() or x.upper() == "REPLACE_ME"))
 
 
 def keygen(opts: dict) -> bool:
-    """Whether this deployment owns its machine keypair: `digitalocean-ssh-keys`
-    is absent. Delegates to ONCE, the standard's reference implementation, so
-    one rule decides it everywhere."""
-    return once_ssh.keygen(opts)
+    """Application facts derived from the shared compute library."""
+    return _mode(opts)['mode'] == 'managed'
 
 
 def entry(opts: dict, slot: str):
@@ -172,12 +83,12 @@ def _missing(opts: dict, keys: list[str]) -> list[str]:
     return [key for key in keys if placeholder(opts.get(key))]
 
 
-def env_errors(env: dict) -> list[str] | None:
+def env_errors(env: dict) -> list[str]:
     if str(env.get(profile_par) or ""):
         return [f"{profile_par} is set. postgres-ha takes profile from colors.yml only; "
                 "an environment overlay could point this deployment at another's "
                 "remote state and backup repository."]
-    return None
+    return []
 
 
 _DNS_RE = re.compile(
@@ -224,7 +135,7 @@ def _pr_str(value) -> str:
 # half-starts.
 _EXCLUSIVE_PORT_KEYS = [
     "patroni-rest-port", "etcd-client-port", "etcd-peer-port",
-    "haproxy-primary-port", "haproxy-replica-port", "haproxy-stats-port",
+    "haproxy-primary-port", "haproxy-replica-port", "haproxy-stats-port", "client-connect-timeout-seconds",
     "restore-check-port",
 ]
 
@@ -252,13 +163,7 @@ def _distinct_port_errors(opts: dict) -> list[str]:
 
 
 def state_errors(opts: dict) -> list[str]:
-    """Everything wrong with `opts` that does not depend on a credential.
-    Empty means the desired state renders. The missing keys are this
-    package's, the selected compute provider's (ONCE's `required_keys`) and
-    the other slots'; the package's own rules follow; the Compute Cluster
-    Standard's — selection, the source lists, the provider and network rules,
-    the topology — are ONCE's over `spec`; and the ingress scope this package
-    alone insists on comes last."""
+    """Application facts derived from the shared compute library."""
     errors: list[str] = []
 
     def push(condition, message: str) -> None:
@@ -266,7 +171,6 @@ def state_errors(opts: dict) -> list[str]:
             errors.append(message)
 
     for key in _missing(opts, [*own_required,
-                               *once_compute.required_keys(spec, opts),
                                *_slot_keys(opts, own_slots, "required")]):
         errors.append(f":{key} is required")
 
@@ -289,18 +193,17 @@ def state_errors(opts: dict) -> list[str]:
     # Opt-out mode reaches the nodes with the operator's own key, so the path
     # to it is desired state there; keygen mode names the generated key itself
     # and must not be asked for one.
-    push(not keygen(opts) and placeholder(opts.get("digitalocean-ssh-private-key")),
-         ":digitalocean-ssh-private-key is required when digitalocean-ssh-keys is supplied")
+    try:
+        mode = _mode(opts)
+    except ValueError as error:
+        errors.append(str(error))
+        mode = {}
+    push(mode.get('mode') == 'external' and not mode.get('private_key_path'),
+         ':ssh-private-key-path is required for external SSH access')
 
     push(opts.get("cluster-nodes") != utils.NODE_COUNT,
          f":cluster-nodes must be {utils.NODE_COUNT}; the topology colocates a "
          "quorum store on the database nodes and cannot elect with fewer")
-
-    push(str(opts.get("digitalocean-vpc-mode")) != "default",
-         ":digitalocean-vpc-mode must be default; the regional default VPC is discovered at runtime")
-    for key in forbidden_vpc_keys:
-        push(key in opts,
-             f":{key} must not be configured; the regional default VPC is discovered at runtime")
 
     for key in ["cluster-host", "cloudflare-zone"]:
         value = opts.get(key)
@@ -359,8 +262,8 @@ def state_errors(opts: dict) -> list[str]:
                 "patroni-loop-wait", "patroni-retry-timeout",
                 "patroni-synchronous-node-count", "backup-retention-full",
                 "restore-check-max-age-hours", "restore-check-max-lag-seconds",
-                "heartbeat-retention-days", "cloudflare-record-ttl",
-                "client-connect-timeout-seconds", *_EXCLUSIVE_PORT_KEYS]:
+                "heartbeat-retention-days", "cloudflare-record-ttl", "client-connect-timeout-seconds",
+                *_EXCLUSIVE_PORT_KEYS]:
         push(not _positive_int(opts.get(key)), f":{key} must be a positive integer")
     errors.extend(_distinct_port_errors(opts))
     # Cloudflare accepts 1 (automatic) or 60..86400. A short explicit TTL is
@@ -369,21 +272,6 @@ def state_errors(opts: dict) -> list[str]:
     ttl_number = ttl if _is_int(ttl) else 0
     push(not (ttl_number == 1 or 60 <= ttl_number <= 86400),
          ":cloudflare-record-ttl must be 1 (automatic) or between 60 and 86400")
-
-    # The endpoint resolves to every node, so a client may try an address
-    # whose machine is powered off. That address does not refuse the
-    # connection, it black-holes the SYN, and libpq's default is to wait out
-    # the OS TCP retry — about two minutes — before trying the next one. This
-    # is the value the documentation and the acceptance probe both use; it is
-    # desired state rather than folklore precisely because getting it wrong
-    # turns a survivable node loss into an outage for a third of new
-    # connections.
-    connect = opts.get("client-connect-timeout-seconds")
-    connect_number = connect if _is_int(connect) else 0
-    push(not (1 <= connect_number <= 30),
-         ":client-connect-timeout-seconds must be between 1 and 30; it "
-         "bounds how long a client waits on a powered-off node's address "
-         "before trying the next one in the endpoint's record set")
 
     sync_count = opts.get("patroni-synchronous-node-count")
     sync_number = sync_count if _is_int(sync_count) else 0
@@ -404,6 +292,21 @@ def state_errors(opts: dict) -> list[str]:
     # backup survived the round trip through the archive. Its tolerance has
     # to leave room for `archive_timeout` plus the restore itself, or the
     # check fails on a healthy cluster and stops meaning anything.
+    # The endpoint resolves to every node, so a client may try an address
+    # whose machine is powered off. That address does not refuse the
+    # connection, it black-holes the SYN, and libpq's default is to wait out
+    # the OS TCP retry — about two minutes — before trying the next one. This
+    # is the value the documentation and the acceptance probe both use; it is
+    # desired state rather than folklore precisely because getting it wrong
+    # turns a survivable node loss into an outage for a third of new
+    # connections.
+    connect = opts.get("client-connect-timeout-seconds")
+    connect_number = connect if _is_int(connect) else 0
+    push(not (1 <= connect_number <= 30),
+         ":client-connect-timeout-seconds must be between 1 and 30; it "
+         "bounds how long a client waits on a powered-off node's address "
+         "before trying the next one in the endpoint's record set")
+
     max_lag = opts.get("restore-check-max-lag-seconds")
     max_lag_number = max_lag if _is_int(max_lag) else 0
     push(not (120 < max_lag_number),
@@ -411,19 +314,23 @@ def state_errors(opts: dict) -> list[str]:
          "fails on a healthy cluster, because a segment is only archived "
          "once archive_timeout elapses")
 
-    errors.extend(cluster.state_errors(spec, opts))
+    errors.extend(compute_validate(opts))
+    if not errors:
+        try:
+            plan_deployment(opts, compute.topology(opts), compute.requirements(opts))
+        except ValueError as error:
+            errors.append(str(error))
 
-    # ONCE checks that each source list is non-empty and every entry a CIDR;
     # the world is a CIDR, and refusing it is this package's own rule: the
     # PostgreSQL port is a genuinely public port.
-    for key in ["digitalocean-ssh-sources", "digitalocean-client-sources"]:
-        push(any(value == "0.0.0.0/0" for value in once_compute.cidrs(opts, key)),
+    for key in ['ssh-sources', 'client-sources']:
+        push(any(value == '0.0.0.0/0' for value in source_cidrs(opts, key, 'postgres-' + key)),
              f":{key} must not contain 0.0.0.0/0; administrative and database ingress stay scoped")
 
     return errors
 
 
 def secret_errors(opts: dict, selected: list[str] | None = None) -> list[str]:
-    chosen = slots if selected is None else selected
+    chosen = own_slots if selected is None else selected
     return [f"required credential is not set: {par_name(key)}"
             for key in dict.fromkeys(_missing(opts, [*own_secrets, *_slot_keys(opts, chosen, "secrets")]))]

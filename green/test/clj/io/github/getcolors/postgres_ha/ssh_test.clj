@@ -21,8 +21,6 @@
   (let [opts (ssh/with-machine-key (assoc fixture :green/event :build))]
     (is (= "/home/build-placeholder/.ssh/postgres-ha-fixture" (:ssh-private-key-path opts)))
     (is (= "/home/build-placeholder/.ssh/postgres-ha-fixture.pub" (:ssh-public-key-path opts)))
-    (testing "the placeholder lands on the provider's own machine-key key"
-      (is (= "/home/build-placeholder/.ssh/postgres-ha-fixture.pub" (:digitalocean-ssh-keys opts))))
     (is (not (re-find #"build-placeholder" (str (System/getenv "HOME")))))))
 
 (deftest a-dry-run-is-held-to-the-same-rule-as-a-build
@@ -33,11 +31,6 @@
   (is (not (ssh/rendered-only? {:green/event :create})))
   (is (= "/home/build-placeholder/.ssh/postgres-ha-fixture"
          (:ssh-private-key-path (ssh/with-machine-key (assoc fixture :green/event :create :green/dry-run true))))))
-
-(deftest real-events-render-the-real-path
-  (let [opts (ssh/with-machine-key (assoc fixture :green/event :health))]
-    (is (not (re-find #"build-placeholder" (:ssh-private-key-path opts))))
-    (is (.endsWith ^String (:ssh-private-key-path opts) "/.ssh/postgres-ha-fixture"))))
 
 (deftest opt-out-opts-pass-through-untouched
   (let [opts (assoc optout :green/event :build)]

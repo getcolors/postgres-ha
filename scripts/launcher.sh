@@ -51,7 +51,7 @@ cp "$launcher" "$tmp/project/green"; chmod +x "$tmp/project/green"
 cp "$root/test/fixtures/colors.yml" "$tmp/project/colors.yml"
 (cd "$tmp/project" && POSTGRES_HA_LIB_ROOT="$root" ./green build >/dev/null) \
   || fail 'the working-tree override did not build'
-[ -f "$tmp/project/.colors/postgres-ha-fixture/postgres-ha-infrastructure/main.tf" ] \
+[ -f "$tmp/project/.colors/postgres-ha-fixture/postgres-ha-infrastructure/shared/shared.tf.json" ] \
   || fail 'a copied payload rendered nothing'
 [ -f "$tmp/project/.colors/postgres-ha-fixture/postgres-ha-cluster/templates/patroni.yml.j2" ] \
   || fail 'a copied payload rendered no cluster configuration'
@@ -111,7 +111,7 @@ cp "$red_launcher" "$tmp/red-project/red"; chmod +x "$tmp/red-project/red"
 cp "$root/test/fixtures/colors.yml" "$tmp/red-project/colors.yml"
 (cd "$tmp/red-project" && POSTGRES_HA_LIB_ROOT="$root" ./red build >/dev/null) \
   || fail 'the red working-tree override did not build'
-[ -f "$tmp/red-project/.colors/postgres-ha-fixture/postgres-ha-infrastructure/main.tf" ] \
+[ -f "$tmp/red-project/.colors/postgres-ha-fixture/postgres-ha-infrastructure/shared/shared.tf.json" ] \
   || fail 'a copied red payload rendered nothing'
 ok 'red working-tree override renders a complete tree from a copied payload'
 
@@ -133,7 +133,7 @@ cp "$blue_launcher" "$tmp/blue-project/blue"; chmod +x "$tmp/blue-project/blue"
 cp "$root/test/fixtures/colors.yml" "$tmp/blue-project/colors.yml"
 (cd "$tmp/blue-project" && POSTGRES_HA_LIB_ROOT="$root" ./blue build >/dev/null) \
   || fail 'the blue working-tree override did not build'
-[ -f "$tmp/blue-project/.colors/postgres-ha-fixture/postgres-ha-infrastructure/main.tf" ] \
+[ -f "$tmp/blue-project/.colors/postgres-ha-fixture/postgres-ha-infrastructure/shared/shared.tf.json" ] \
   || fail 'a copied blue payload rendered nothing'
 ok 'blue working-tree override renders a complete tree from a copied payload'
 

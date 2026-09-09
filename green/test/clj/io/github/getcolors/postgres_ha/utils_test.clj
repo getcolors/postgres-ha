@@ -2,19 +2,6 @@
   (:require [clojure.test :refer [deftest is testing]]
             [io.github.getcolors.postgres-ha.utils :as utils]))
 
-(def opts {:profile "pg" :digitalocean-name "postgres-ha"})
-
-(deftest topology-is-derived-not-configured
-  (is (= [1 2 3] (vec (utils/ordinals))))
-  (is (= 3 utils/node-count))
-  (is (= ["postgres-ha-1" "postgres-ha-2" "postgres-ha-3"]
-         (mapv #(utils/node-name opts %) (utils/ordinals)))))
-
-(deftest names-fall-back-rather-than-rendering-nil
-  (testing "a half-populated desired state still renders reviewable names"
-    (is (= "postgres-ha-1" (utils/node-name {} 1)))
-    (is (= "postgres-ha-1" (utils/node-name {:digitalocean-name ""} 1)))))
-
 (deftest par-lookup-names-the-shared-credential-namespace
   (is (= "{{ lookup('env','COLORS_PAR_POSTGRES_ADMIN_PASSWORD') }}"
          (utils/par-lookup :postgres-admin-password)))

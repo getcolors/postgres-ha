@@ -1,75 +1,15 @@
-// Credential-free desired-state validation, and the provider registry it
-// uses — the port of io.github.getcolors.postgres-ha.validate.
-//
-// The compute registry is package-owned — this package provisions three
-// droplets, its own firewall and its own DNS record set, so the keys a stage
-// interpolates are not ONCE's single-server keys — and the operations over it
-// are ONCE's `computeCluster` module, the one implementation of the Compute
-// Cluster Standard: selection, the required keys, the source lists, the
-// provider rules, the network mode and the topology are checked there over
-// `spec`, never copied here. What stays here is what only this package knows:
-// the fixed node count, the discovered VPC, the scoped ingress, and every
-// PostgreSQL, Patroni, etcd, HAProxy and pgBackRest rule.
-//
-// Green renders its keys as Clojure keywords, so every message here carries
-// the same leading colon — the three colours must report identical errors for
-// one colors.yml.
-//
-// Every check accumulates. A run reports all of a file's problems at once with
-// exit 2, because fixing desired state one error per invocation is how a
-// person gives up on a config file.
 
 import { parName } from "red/cli";
 import type { Registry } from "red/providers";
 import type { Opts } from "red/workflow";
-import { compute, computeCluster } from "package-once-red";
-import { onceSsh } from "./once.ts";
+import {registry,validate as computeValidate,plan_deployment,keyMode,source_cidrs} from "colors-compute-red";
+import * as compute from "./compute.ts";
+
 import * as utils from "./utils.ts";
 
-// provider-compute -> what that choice implies.
-//
-// `required` are non-secret keys the template interpolates. `secrets` arrive
-// only through `COLORS_PAR_*`. `tofuEnv` is the subset OpenTofu reads
-// natively from the process environment, so a credential never has to be
-// rendered into a .tf file sitting in the work directory in plaintext.
-// `network` is discovered: the region's default VPC, never one this package
-// owns. `digitalocean-ssh-keys` is deliberately absent from `required`: per the
-// SSH Keypair Standard its absence selects keygen mode, and its presence is the
-// opt-out that passes the operator's key ids through untouched.
-export const computeProviders: computeCluster.ClusterRegistry = {
-  digitalocean: {
-    required: ["digitalocean-name", "digitalocean-region", "digitalocean-size",
-               "digitalocean-image", "digitalocean-ssh-sources",
-               "digitalocean-client-sources", "digitalocean-vpc-mode"],
-    secrets: ["do-token"],
-    tofuEnv: { "do-token": "DIGITALOCEAN_TOKEN" },
-    network: { mode: "discovered" },
-  },
-};
-
-// The provider a deployment created before this package recorded one in its
-// compute output must be running: the only one it ever offered.
-export const defaultComputeProvider = "digitalocean";
-
-// How this package describes itself to ONCE's `computeCluster`. One
-// homogeneous role of `cluster-nodes` members, whose fallback addresses start
-// at offset 11 so that `build` renders the same 192.0.2.11-13 and
-// 10.114.0.11-13 it always did. The fallback subnet stands in for the
-// discovered VPC's range on a build; on a real run the range is the compute
-// state's `vpc_ip_range`.
-export const spec: computeCluster.ClusterSpec = {
-  registry: computeProviders,
-  default: defaultComputeProvider,
-  sources: { nonEmpty: ["ssh-sources", "client-sources"], mayBeEmpty: [] },
-  roles: [{ role: null, countKey: "cluster-nodes", count: 3, fallbackOffset: 11 }],
-  fallbackSubnet: "10.114.0.0/20",
-};
-
-// Provider slot -> provider name -> what that choice implies. The compute slot
-// is the registry above, so the OpenTofu environment and the secrets are read
-// from one place whichever slot a stage asks for.
+export const computeProviders=registry.compute;
+export const defaultComputeProvider='digitalocean';
 export const providers: Registry = {
-  "provider-compute": computeProviders,
 
   "provider-dns": {
     cloudflare: {
@@ -80,29 +20,11 @@ export const providers: Registry = {
     },
   },
 
-  "provider-backend": {
-    local: { required: [], secrets: [], tofuEnv: {} },
-    s3: {
-      required: ["s3-bucket", "s3-region"],
-      secrets: ["s3-access-key-id", "s3-secret-access-key"],
-      tofuEnv: { "s3-access-key-id": "AWS_ACCESS_KEY_ID",
-                 "s3-secret-access-key": "AWS_SECRET_ACCESS_KEY" },
-    },
-    // R2 is S3-compatible and therefore authenticates through the AWS chain.
-    // These are the *state* credentials; the backup repository has its own
-    // pair so a leaked backup key cannot rewrite infrastructure state.
-    r2: {
-      required: ["r2-bucket", "r2-endpoint"],
-      secrets: ["r2-access-key-id", "r2-secret-access-key"],
-      tofuEnv: { "r2-access-key-id": "AWS_ACCESS_KEY_ID",
-                 "r2-secret-access-key": "AWS_SECRET_ACCESS_KEY" },
-    },
-  },
+  "provider-backend": Object.fromEntries(Object.entries(registry.backend).map(([key,value])=>[key,{required:value.required,secrets:value.secrets,tofuEnv:{}}])),
 };
 
 export const slots = ["provider-compute", "provider-dns", "provider-backend"];
 
-// The slots this package selects and checks itself; the compute slot is ONCE's.
 export const ownSlots = ["provider-dns", "provider-backend"];
 
 export const profilePar = parName("profile");
@@ -128,26 +50,13 @@ export const ownSecrets = [
   "backup-r2-access-key-id", "backup-r2-secret-access-key",
 ];
 
-// A VPC is discovered, never described. Accepting any of these would let one
-// deployment place its nodes on another's network while still passing every
-// other check, so their mere presence is an error rather than a warning.
-// `digitalocean-vpc-uuid` and `digitalocean-vpc-cidr` are refused by ONCE's
-// discovered-network rule with its own message; these are the spellings only
-// this package refuses.
-export const forbiddenVpcKeys = [
-  "digitalocean-vpc-id", "digitalocean-vpc-name", "digitalocean-vpc",
-];
-
 export function placeholder(x: unknown): boolean {
   return x == null ||
     (typeof x === "string" && (!x.trim() || x.toUpperCase() === "REPLACE_ME"));
 }
 
-// Whether this deployment owns its machine keypair: `digitalocean-ssh-keys` is
-// absent. Delegates to ONCE, the standard's reference implementation, so one
-// rule decides it everywhere.
 export function keygen(opts: Opts): boolean {
-  return onceSsh.keygen(opts);
+  try{return keyMode(opts).mode==='managed';}catch{return true;}
 }
 
 interface Entry { required?: string[]; secrets?: string[]; tofuEnv?: Record<string, string> }
@@ -245,12 +154,6 @@ function distinctPortErrors(opts: Opts): string[] {
   ];
 }
 
-// Everything wrong with `opts` that does not depend on a credential. Empty
-// means the desired state renders. The missing keys are this package's, the
-// selected compute provider's (ONCE's `requiredKeys`) and the other slots';
-// the package's own rules follow; the Compute Cluster Standard's — selection,
-// the source lists, the provider and network rules, the topology — are ONCE's
-// over `spec`; and the ingress scope this package alone insists on comes last.
 export function stateErrors(opts: Opts): string[] {
   const errors: string[] = [];
   const push = (condition: unknown, message: string) => {
@@ -258,7 +161,6 @@ export function stateErrors(opts: Opts): string[] {
   };
 
   for (const key of missing(opts, [...ownRequired,
-                                   ...compute.requiredKeys(spec, opts),
                                    ...slotKeys(opts, ownSlots, "required")])) {
     errors.push(`:${key} is required`);
   }
@@ -281,19 +183,14 @@ export function stateErrors(opts: Opts): string[] {
   // Opt-out mode reaches the nodes with the operator's own key, so the path to
   // it is desired state there; keygen mode names the generated key itself and
   // must not be asked for one.
-  push(!keygen(opts) && placeholder(opts["digitalocean-ssh-private-key"]),
-       ":digitalocean-ssh-private-key is required when digitalocean-ssh-keys is supplied");
+  push(!keygen(opts) && placeholder(keyMode(opts).private_key_path),
+       ":ssh-private-key-path is required for external SSH access");
 
   push(opts["cluster-nodes"] !== utils.nodeCount,
        `:cluster-nodes must be ${utils.nodeCount}; the topology colocates a ` +
        "quorum store on the database nodes and cannot elect with fewer");
 
-  push(String(opts["digitalocean-vpc-mode"]) !== "default",
-       ":digitalocean-vpc-mode must be default; the regional default VPC is discovered at runtime");
-  for (const key of forbiddenVpcKeys) {
-    push(key in opts,
-         `:${key} must not be configured; the regional default VPC is discovered at runtime`);
-  }
+
 
   for (const key of ["cluster-host", "cloudflare-zone"]) {
     const value = opts[key];
@@ -408,13 +305,11 @@ export function stateErrors(opts: Opts): string[] {
        "fails on a healthy cluster, because a segment is only archived " +
        "once archive_timeout elapses");
 
-  errors.push(...computeCluster.stateErrors(spec, opts));
+  errors.push(...computeValidate(opts));
+  if(!errors.length)try{plan_deployment(opts,compute.topology(opts),compute.requirements(opts));}catch(error){errors.push((error as Error).message);}
 
-  // ONCE checks that each source list is non-empty and every entry a CIDR;
-  // the world is a CIDR, and refusing it is this package's own rule: the
-  // PostgreSQL port is a genuinely public port.
-  for (const key of ["digitalocean-ssh-sources", "digitalocean-client-sources"]) {
-    push(compute.cidrs(opts, key).some((value) => value === "0.0.0.0/0"),
+  for (const key of ["ssh-sources", "client-sources"]) {
+    push(source_cidrs(opts,key,"postgres-"+key).some((value) => value === "0.0.0.0/0"),
          `:${key} must not contain 0.0.0.0/0; administrative and database ingress stay scoped`);
   }
 

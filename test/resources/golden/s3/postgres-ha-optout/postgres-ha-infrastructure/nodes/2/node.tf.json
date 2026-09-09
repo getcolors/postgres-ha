@@ -1,0 +1,51 @@
+{
+  "output": {
+    "params": {
+      "value": {
+        "droplet_id": "${digitalocean_droplet.node.id}",
+        "ip": "${digitalocean_droplet.node.ipv4_address}",
+        "name": "${digitalocean_droplet.node.name}",
+        "node_id": "2",
+        "provider": "digitalocean",
+        "provider_id": "${digitalocean_droplet.node.id}",
+        "ssh_key_id": "12345678",
+        "sudoer": "root",
+        "user": "root",
+        "vpc_id": "${digitalocean_droplet.node.vpc_uuid}",
+        "vpc_ip": "${digitalocean_droplet.node.ipv4_address_private}"
+      }
+    }
+  },
+  "provider": {
+    "digitalocean": {}
+  },
+  "resource": {
+    "digitalocean_droplet": {
+      "node": {
+        "image": "ubuntu-24-04-x64",
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "name": "postgres-ha-fixture-2",
+        "region": "ams3",
+        "size": "s-2vcpu-4gb",
+        "ssh_keys": [
+          "12345678"
+        ],
+        "tags": [
+          "colors-compute-postgres-ha-optout"
+        ],
+        "vpc_uuid": "00000000-0000-0000-0000-000000000001"
+      }
+    }
+  },
+  "terraform": {
+    "required_providers": {
+      "digitalocean": {
+        "source": "digitalocean/digitalocean",
+        "version": "2.51.0"
+      }
+    },
+    "required_version": ">= 1.8.0"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "output": {
+    "registration": {
+      "value": {
+        "id": "${digitalocean_ssh_key.machine.id}",
+        "provider": "digitalocean",
+        "scope": "account"
+      }
+    },
+    "ssh_key_id": {
+      "value": "${digitalocean_ssh_key.machine.id}"
+    }
+  },
+  "resource": {
+    "digitalocean_ssh_key": {
+      "machine": {
+        "lifecycle": {
+          "prevent_destroy": true
+        },
+        "name": "postgres-ha-fixture",
+        "public_key": "ssh-ed25519 PLACEHOLDER managed-by-colors"
+      }
+    }
+  }
+}

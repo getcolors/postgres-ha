@@ -34,17 +34,17 @@ build_variant() {
     ./red build -f "$state" >/dev/null)
   (cd "$root/blue" && env COLORS_PAR_WORKDIR="$tmp/$variant/blue" COLORS_PAR_PROVIDER_BACKEND="$backend" \
     uv run python -m package_postgres_ha_blue build -f "$state" >/dev/null)
-  diff -r "$tmp/$variant/green" "$tmp/$variant/red"
-  diff -r "$tmp/$variant/green" "$tmp/$variant/blue"
+  diff -r --exclude=__pycache__ "$tmp/$variant/green" "$tmp/$variant/red"
+  diff -r --exclude=__pycache__ "$tmp/$variant/green" "$tmp/$variant/blue"
 }
 
 for fixture in colors optout; do
-  for backend in local r2; do
+  for backend in s3 r2; do
     build_variant "$fixture" "$backend"
   done
 done
 
-diff -r "$root/green/src/resources/io/github/getcolors/postgres-ha" "$root/red/resources"
-diff -r "$root/green/src/resources/io/github/getcolors/postgres-ha" "$root/blue/src/package_postgres_ha_blue/resources"
+diff -r --exclude=__pycache__ "$root/green/src/resources/io/github/getcolors/postgres-ha" "$root/red/resources"
+diff -r --exclude=__pycache__ "$root/green/src/resources/io/github/getcolors/postgres-ha" "$root/blue/src/package_postgres_ha_blue/resources"
 
 echo "green, red, and blue postgres-ha artifacts are byte-identical"

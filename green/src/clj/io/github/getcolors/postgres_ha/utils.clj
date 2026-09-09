@@ -24,17 +24,6 @@
   []
   (range 1 (inc node-count)))
 
-(defn base-name
-  [opts]
-  (or (not-empty (str (:digitalocean-name opts))) "postgres-ha"))
-
-(defn node-name
-  "The droplet name for ordinal `n`, also the Ansible inventory host name and
-  the Patroni member name. One string for all three keeps `patronictl list`,
-  `tofu state list` and the inventory mutually greppable."
-  [opts n]
-  (str (base-name opts) "-" n))
-
 (defn par-lookup
   "The Ansible expression that reads a credential at play time.
 

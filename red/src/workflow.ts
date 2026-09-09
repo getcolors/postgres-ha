@@ -1,25 +1,10 @@
-// The lifecycle graph, the preflight, and the per-stage remote-state advice —
-// the port of io.github.getcolors.postgres-ha.workflow.
-//
-// Create is strictly sequential. The stages are not independent: DNS needs the
-// addresses compute produced, the cluster play needs the inventory those
-// addresses build, and acceptance needs a converged cluster *and* a resolvable
-// name. Fanning any of it out would only buy back the seconds that DigitalOcean
-// spends creating three droplets in one `apply` anyway.
-//
-// Delete runs the same edges backwards, with one addition: it adopts the
-// cluster out of remote state first, because the local SSH configuration it
-// has to withdraw is keyed by the nodes and by then the droplets may already
-// be gone. The state is read once, in preflight, so the Compute Provider
-// Standard's switch guard runs before the credentials are checked; the read is
-// handed to `load-infrastructure` rather than repeated.
 
 import { parName, readPars } from "red/cli";
 import * as dryRun from "red/dry-run";
 import { preflight, type PreflightContext } from "red/lifecycle";
 import * as progress from "red/progress";
 import { adviceAdd, failed, workflow, type Opts, type WireDecl } from "red/workflow";
-import { compute, computeCluster } from "package-once-red";
+
 import * as ssh from "./ssh.ts";
 import * as sshConfig from "./ssh-config.ts";
 import * as tools from "./tools.ts";
@@ -28,13 +13,12 @@ import * as validate from "./validate.ts";
 export const defaults: Opts = {
   "provider-compute": validate.defaultComputeProvider,
   "provider-dns": "cloudflare",
-  "provider-backend": "local",
+  "provider-backend": "r2",
   "compute-prevent-destroy": true,
   workdir: ".colors",
   "cluster-nodes": 3,
   "cloudflare-proxied": false,
   "cloudflare-record-ttl": 60,
-  "digitalocean-vpc-mode": "default",
   "postgres-port": 5432,
   "postgres-admin-user": "postgres",
   "postgres-replication-user": "replicator",
@@ -64,69 +48,11 @@ export const lifecycleEvents = ["create", "delete"];
 const realLifecycleEvent = ({ event, real }: PreflightContext): boolean =>
   real && lifecycleEvents.includes(String(event));
 
-// Preflight. On a real create or delete the compute state is read once through
-// `reader` — the package's `tools.stateOutput` unless a test injects another —
-// on the same defaulted and overlaid opts the validators see, and only once
-// desired state itself has passed, so the reader never renders an invalid
-// colors.yml. The read feeds the switch guard here and travels on under
-// `postgres-ha/state` for `load-infrastructure` to adopt.
-//
-// Credentials are only demanded by a run that will actually use them. `build`
-// and `--dry-run` therefore work on a fresh checkout with an empty
-// environment, which is what makes them a safe way to review a colors.yml
-// edit.
-export async function startStep(
-  opts: Opts,
-  env: Record<string, string | undefined> = process.env,
-  reader: compute.StateReader = tools.stateOutput,
-): Promise<Opts> {
-  const overlaid = readPars({ ...defaults, ...opts }, env);
-  const context: PreflightContext = {
-    event: typeof overlaid["red/event"] === "string" ? overlaid["red/event"] as string : undefined,
-    real: !overlaid["red/dry-run"],
-  };
-  const state: compute.StateRead =
-    realLifecycleEvent(context)
-      && (validate.envErrors(env) ?? []).length === 0
-      && validate.stateErrors(overlaid).length === 0
-      ? await computeCluster.readState(overlaid, reader)
-      : {};
-  return preflight(opts, {
-    defaults,
-    overlay: readPars,
-    validators: [
-      (_opts, environment) => validate.envErrors(environment),
-      (current) => validate.stateErrors(current),
-      // Standard §4 before the credentials: a recorded provider that differs
-      // from the selected one reports the actionable error, not a missing
-      // token for the provider that was just selected.
-      (current, _environment, ctx) => (realLifecycleEvent(ctx)
-        ? computeCluster.providerValidator(validate.spec, current, state.params, () => validate.secretErrors(current))
-        : []),
-      (current, _environment, { event, real }) =>
-        real && event === "delete" && current["compute-prevent-destroy"]
-          ? ["compute destruction is protected; set " +
-             `${parName("compute-prevent-destroy")}=false for this one delete`]
-          : [],
-    ],
-    // The machine key's create matrix and the DigitalOcean preflight run
-    // before any template is rendered: an unowned key on disk or at the
-    // provider stops the run while stopping is still free. Every other event
-    // fills the same template values — a destroy renders before it destroys —
-    // but checks no key, because the delete's key cleanup runs after the
-    // compute destroy.
-    afterValidate: async (current, _environment, ctx) => {
-      const handed = realLifecycleEvent(ctx) ? { ...current, "postgres-ha/state": state } : current;
-      if (ctx.real && ctx.event === "create") {
-        let next = await ssh.ensureKey(handed, async () => state.params);
-        if (failed(next)) return next;
-        next = await ssh.preflight(ssh.withMachineKey(next));
-        if (!failed(next)) next = sshConfig.preflight(next);
-        return failed(next) ? next : { ...next, "red/exit": 0 };
-      }
-      return { ...ssh.withMachineKey(handed), "red/exit": 0 };
-    },
-  }, env);
+export async function startStep(opts:Opts,env:Record<string,string|undefined>=process.env):Promise<Opts>{
+ return preflight(opts,{defaults,overlay:readPars,validators:[(_o,e)=>validate.envErrors(e),o=>validate.stateErrors(o),
+  (o,_e,c)=>realLifecycleEvent(c)&&!validate.stateErrors(o).length?validate.secretErrors(o):[],
+  (o,_e,c)=>c.real&&c.event==='delete'&&o['compute-prevent-destroy']?['compute destruction is protected; set COLORS_PAR_COMPUTE_PREVENT_DESTROY=false for this one delete']:[]],
+ afterValidate:async(current,_e,c)=>c.real&&c.event==='create'?sshConfig.preflight(current):{...ssh.withMachineKey(current),'red/exit':0}},env);
 }
 
 export function wireFn(step: string, runOpts: Opts): WireDecl | undefined {
@@ -141,8 +67,7 @@ export function wireFn(step: string, runOpts: Opts): WireDecl | undefined {
       // The keypair goes after the compute destroy (ssh-keypair.md §3.3): a
       // key that predeceases its hosts locks the operator out of nodes that
       // still exist.
-      "postgres-ha/infrastructure": [tools.infrastructureStep, "postgres-ha/ssh-cleanup"],
-      "postgres-ha/ssh-cleanup": [ssh.cleanupStep, "postgres-ha/generated-cleanup"],
+      "postgres-ha/infrastructure": [tools.infrastructureStep, "postgres-ha/generated-cleanup"],
       "postgres-ha/generated-cleanup": [tools.generatedCleanupStep],
     };
     return graph[step];
@@ -171,13 +96,11 @@ export const sideEffectingSteps = [
 ];
 
 function create() {
-  let wf = workflow({ start: "postgres-ha/start", wireFn });
+  let wf = workflow({ start: "postgres-ha/start", wireFn,nextFn:(_step,next,opts)=>opts["postgres-ha/already-destroyed"]||failed(opts)?[]:(next??[]).map(step=>[step,opts]) });
   wf = adviceAdd(wf, "postgres-ha/load-infrastructure", "before",
                  "io.github.getcolors.postgres-ha.workflow/backend",
                  backendAdvice(tools.infrastructureTool));
-  wf = adviceAdd(wf, "postgres-ha/infrastructure", "before",
-                 "io.github.getcolors.postgres-ha.workflow/backend",
-                 backendAdvice(tools.infrastructureTool));
+
   wf = adviceAdd(wf, "postgres-ha/dns", "before",
                  "io.github.getcolors.postgres-ha.workflow/backend",
                  backendAdvice(tools.dnsTool));

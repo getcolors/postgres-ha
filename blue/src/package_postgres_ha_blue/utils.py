@@ -1,11 +1,4 @@
-"""Launcher contract and deterministic topology helpers, the port of
-io.github.getcolors.postgres-ha.utils.
-
-Everything here is a pure function of desired state. The topology is derived
-rather than configured: three nodes with stable ordinals and stable droplet
-names, so an OpenTofu address and an inventory host name never move because
-a list was reordered. The `~/.ssh/config` aliases are the Compute Cluster
-Standard's, derived by ONCE and wrapped in `tools.ssh_alias`."""
+"""Application facts derived from the shared compute library."""
 
 from __future__ import annotations
 
@@ -24,18 +17,6 @@ NODE_COUNT = 3
 def ordinals() -> list[int]:
     """1..NODE_COUNT. The one place the node range is produced."""
     return list(range(1, NODE_COUNT + 1))
-
-
-def base_name(opts: dict) -> str:
-    name = str(opts.get("digitalocean-name") or "")
-    return name if name else "postgres-ha"
-
-
-def node_name(opts: dict, n: int) -> str:
-    """The droplet name for ordinal `n`, also the Ansible inventory host name
-    and the Patroni member name. One string for all three keeps `patronictl
-    list`, `tofu state list` and the inventory mutually greppable."""
-    return f"{base_name(opts)}-{n}"
 
 
 def par_lookup(key: str) -> str:

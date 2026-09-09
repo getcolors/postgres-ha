@@ -75,3 +75,6 @@ cloudflare-record-ttl: 60
 
 r2-bucket: fixture-state
 r2-endpoint: https://account.r2.cloudflarestorage.com
+
+s3-bucket: fixture-state
+s3-region: eu-west-1

@@ -1,18 +1,7 @@
 (ns io.github.getcolors.postgres-ha.tools
-  "The five stages: DigitalOcean infrastructure, Cloudflare DNS, local SSH
-  configuration, the remote cluster convergence, and acceptance.
-
-  Every stage renders into `.colors/<profile>/<stage>/` and, for the OpenTofu
-  ones, keys its remote state at `<profile>/<stage>.tfstate`. Those two names
-  are the deployment's identity; changing either orphans live infrastructure,
-  so they are constants here and asserted by the golden suite.
-
-  The cluster itself — which machines exist, at which addresses — is the
-  Compute Cluster Standard's `params`, adopted through ONCE's
-  `compute-cluster` namespace and carried under `:once/cluster`. This
-  package puts its own facts inside it: `vpc_id` and `vpc_ip_range` at the
-  top level."
+  "Application stages fed by the shared compute library."
   (:require [cheshire.core :as json]
+            [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.walk :as walk]
             [green.ansible :as ansible]
@@ -22,8 +11,10 @@
             [green.scaffold :as sc]
             [green.tofu :as tofu]
             [green.workflow :as wf]
-            [io.github.getcolors.once.compute :as compute]
-            [io.github.getcolors.once.compute-cluster :as cluster]
+            [io.github.getcolors.postgres-ha.compute :as compute]
+            [io.github.getcolors.compute-orchestration :as orchestration]
+            [io.github.getcolors.compute-planning :as planning]
+            [io.github.getcolors.compute-inspection :as inspection]
             [io.github.getcolors.postgres-ha.ssh :as ssh]
             [io.github.getcolors.postgres-ha.ssh-config :as ssh-config]
             [io.github.getcolors.postgres-ha.utils :as utils]
@@ -64,240 +55,54 @@
 (defn- refuse [opts errors]
   (assoc opts :green/exit 1 :green/err (str/join "\n" errors)))
 
-;; ---------------------------------------------------------------------------
-;; Placeholder topology
-;;
-;; `build` renders the whole tree without contacting a provider, so it needs
-;; values that are obviously not real. The nodes are ONCE's fallbacks — RFC
-;; 5737 TEST-NET-1 public addresses and RFC 1918 private ones cut from
-;; `spec`'s subnet at offset 11 — and the network facts beside them are the
-;; stand-ins below. A golden file that leaked into a real run fails loudly
-;; rather than pointing at somebody's host, and `bb golden` stays a pure
-;; function of colors.yml.
-
-(def fallback-outputs
-  {:vpc_id "00000000-0000-0000-0000-000000000000"
-   :vpc_ip_range "10.114.0.0/20"})
-
-(defn- cluster-nodes
-  "ONCE's nodes for this deployment: the adopted `params.nodes` on a real run,
-  the fallbacks on a build — renamed to what this package has always called
-  its nodes, `<name>-<ordinal>`, so the rendered inventory is byte-identical
-  to what it was."
-  [opts]
-  (let [params (:once/cluster opts)
-        nodes (cluster/nodes validate/spec opts params)]
-    (if (some? params)
-      nodes
-      (mapv (fn [{:keys [index] :as node}]
-              (assoc node :name (utils/node-name opts (inc index))))
-            nodes))))
-
-(defn ssh-alias
-  "The `~/.ssh/config` Host entry the operator commands use for ordinal `n`:
-  ONCE's `<profile>-<index>`, the Compute Cluster Standard's alias for the
-  node at 0-based `index`. ONCE's list opens with the bare profile, so the
-  1-based ordinal is also the position of its node's alias."
-  [opts n]
-  (nth (cluster/aliases validate/spec opts) n))
-
-(defn nodes
-  "The rendered topology: one map per ordinal over the node ONCE reports —
-  the adopted cluster on a real run, the placeholders before the
-  infrastructure stage has run. Pure: given the same opts it is the same
-  vector, which is what makes the inventory and the goldens deterministic."
-  [opts]
-  (mapv (fn [{:keys [index name ip vpc_ip]}]
-          (let [ordinal (inc index)]
-            {:ordinal ordinal
-             :name name
-             :alias (ssh-alias opts ordinal)
-             :public-ip ip
-             :private-ip vpc_ip}))
+(defn- cluster-nodes [opts] (compute/resolved opts))
+(defn ssh-alias [opts n] (str (:profile opts) "-" (dec n)))
+(defn nodes [opts]
+  (mapv (fn [{:keys [index name ip vpc_ip user]}]
+          {:ordinal (inc index) :name name :alias (ssh-alias opts (inc index)) :public-ip ip :private-ip vpc_ip :user user})
         (cluster-nodes opts)))
+(defn private-key-file [opts] (or (:ssh-private-key-path opts) ""))
 
-;; ---------------------------------------------------------------------------
-;; Stage 1 — infrastructure
-
-(defn infrastructure-data
-  "The compute template's data. The machine-key paths are filled here as well
-  as in preflight, so the template renders the same bytes whichever step
-  scaffolds it; in keygen mode the template references the key resource and
-  the literal list is not rendered."
-  [opts]
-  (let [opts (ssh/with-machine-key opts)]
-    (assoc opts
-         :node-names-hcl (tofu/hcl-list (map #(utils/node-name opts %) (utils/ordinals)))
-         :ssh-keys-hcl (if (validate/keygen? opts)
-                         "[]"
-                         (tofu/hcl-list (compute/cidrs opts :digitalocean-ssh-keys)))
-         :ssh-sources-hcl (tofu/hcl-list (compute/cidrs opts :digitalocean-ssh-sources))
-         :client-sources-hcl (tofu/hcl-list (compute/cidrs opts :digitalocean-client-sources)))))
-
-(defn private-key-file
-  "The private key every play and the acceptance script reach the nodes with:
-  the generated key's path in keygen mode (the build placeholder on a build or
-  a dry-run), the operator's `digitalocean-ssh-private-key` in opt-out mode."
-  [opts]
-  (if (validate/keygen? opts)
-    (str (:ssh-private-key-path opts))
-    (str (:digitalocean-ssh-private-key opts))))
-
-(defn infrastructure-specs
-  [opts]
-  (let [dir (tool-dir opts infrastructure-tool)]
-    [(spec (template "infrastructure" "main.tf") (str dir "/main.tf")
-           (infrastructure-data opts))]))
-
-(defn output-params
-  "The compute stage's `params` output, as ONCE reads it: keywordized, the
-  underscores kept; nil when the apply reported none."
-  [result]
-  (cluster/output-params {:tofu/outputs (:postgres-ha/outputs result)}))
-
-(defn- non-blank? [v] (and (string? v) (not (str/blank? v))))
-
-(defn params-errors
-  "The extension keys this package puts inside `params`, which ONCE preserves
-  but does not read: a non-blank `vpc_id` and a canonical `vpc_ip_range`, the
-  network every etcd, Patroni and firewall rule is scoped to. A real run is
-  refused without them; the legacy translation is held to the same rule."
-  [params]
-  (vec
-   (concat
-    (when-not (non-blank? (:vpc_id params))
-      ["compute state carries no vpc_id"])
+(defn- compute-json [value indent]
+  (let [padding #(apply str (repeat % " "))]
     (cond
-      (not (non-blank? (:vpc_ip_range params)))
-      ["compute state carries no vpc_ip_range"]
-      (not (cluster/ipv4-network (:vpc_ip_range params)))
-      [(str "compute state vpc_ip_range " (pr-str (:vpc_ip_range params))
-            " is not a canonical IPv4 network such as 10.40.0.0/24")]))))
+      (map? value) (if (empty? value) "{}"
+                      (str "{\n" (str/join ",\n" (for [[key item] (sort-by key value)]
+                                                       (str (padding (+ indent 2)) (json/generate-string key) ": " (compute-json item (+ indent 2)))))
+                           "\n" (padding indent) "}"))
+      (sequential? value) (if (empty? value) "[]"
+                              (str "[\n" (str/join ",\n" (map #(str (padding (+ indent 2)) (compute-json % (+ indent 2))) value)) "\n" (padding indent) "]"))
+      :else (json/generate-string value))))
 
-(defn- checked
-  "`opts` once the adopted cluster passes `params-errors`, or the refusal."
-  [opts]
-  (let [errors (some-> (:once/cluster opts) params-errors)]
-    (if (seq errors) (refuse opts errors) opts)))
+(defn infrastructure-step [opts]
+  (try
+    (let [planning? (or (= :build (:green/event opts)) (:green/dry-run opts))
+          result (if planning?
+                   (planning/plan-deployment opts (compute/topology opts) (compute/requirements opts))
+                   (orchestration/orchestrate opts (compute/topology opts) (compute/requirements opts)))]
+      (when planning?
+        (doseq [[stage documents] (cons ["shared" (get-in result [:documents :shared])]
+                                      (map (fn [[id documents]] [(str "nodes/" id) documents]) (get-in result [:documents :nodes])))
+                [filename document] documents]
+          (let [target (io/file (tool-dir opts infrastructure-tool) stage filename)]
+            (io/make-parents target)
+            (spit target (str (compute-json document 0) "\n")))))
+      (if-not (contains? #{"ready" "planned" "destroyed"} (:status result))
+        (assoc opts :green/exit 1 :green/err "compute lifecycle refused; legacy monolithic state requires explicit migration")
+        (cond-> (assoc opts :green/exit 0)
+          (:cluster result) (assoc :colors-compute/cluster (:cluster result) :colors-compute/shared (:shared result))
+          (get-in result [:key :private_key_path])
+          (assoc :ssh-private-key-path (if planning? (str/replace (get-in result [:key :private_key_path]) "$HOME/.ssh" "/home/build-placeholder/.ssh") (get-in result [:key :private_key_path]))))))
+    (catch Exception _ (assoc opts :green/exit 1 :green/err "compute lifecycle refused; legacy monolithic state requires explicit migration"))))
 
-(defn resolve-infrastructure
-  "What the infrastructure stage hands on after its apply: `result` as it is
-  on a failure, a delete or a build, and otherwise ONCE's `resolved-cluster`
-  over the apply's `params` output — nil outputs and a partial cluster are
-  refused there — checked against `params-errors`. Pure, so the wiring is
-  testable without an apply."
-  [opts result]
-  (cond
-    (wf/failed? result) result
-    (contains? #{:delete :build} (:green/event opts)) result
-    :else (let [resolved (cluster/resolved-cluster validate/spec opts result {}
-                                                   (output-params result))]
-            (if (wf/failed? resolved) resolved (checked resolved)))))
-
-(defn infrastructure-step
-  [opts]
-  (resolve-infrastructure
-   opts
-   (tofu/tofu-with-spec opts (infrastructure-specs opts)
-                        {:dir (tool-dir opts infrastructure-tool)
-                         :env (credential-env opts :provider-compute)
-                         :output-key :postgres-ha/outputs})))
-
-(defn- step-error [dir label {:keys [out err]}]
-  (ex-info (str label " failed: " (or (not-empty err) (not-empty out) "(no output)"))
-           {:dir dir}))
-
-(defn legacy-params
-  "A state written before this package recorded `params`: the parallel
-  `node_public_ips` and `node_private_ips` lists, zipped into the nodes the
-  standard describes, with `vpc_id` and `vpc_ip_range` copied and the names
-  this package has always given its nodes. Refused, as the SDK's step error
-  carrying `dir`, when the two lists disagree with each other or with
-  `cluster-nodes` — guessing which droplet is which is how a delete destroys
-  around a node — and when no `vpc_id` or `vpc_ip_range` was recorded. The
-  range's form is `params-errors`' to check, the same way for a legacy and a
-  recorded state."
-  [opts outputs dir]
-  (let [publics (vec (:node_public_ips outputs))
-        privates (vec (:node_private_ips outputs))
-        n (:cluster-nodes opts)]
-    (when-not (= n (count publics) (count privates))
-      (throw (ex-info (str "legacy state lists " (count publics) " public addresses and "
-                           (count privates) " private addresses; refusing to guess the cluster")
-                      {:dir dir})))
-    (doseq [k [:vpc_id :vpc_ip_range]]
-      (when-not (non-blank? (get outputs k))
-        (throw (ex-info (str "legacy state carries no " (name k)) {:dir dir}))))
-    {:provider validate/default-compute-provider
-     :vpc_id (:vpc_id outputs)
-     :vpc_ip_range (:vpc_ip_range outputs)
-     :nodes (mapv (fn [i]
-                    {:index i
-                     :role nil
-                     :name (utils/node-name opts (inc i))
-                     :ip (nth publics i)
-                     :vpc_ip (nth privates i)
-                     :user "root"
-                     :sudoer "root"})
-                  (range n))}))
-
-(defn state-output
-  "The reader ONCE's `read-state` takes: the compute `params` recorded in the
-  infrastructure state, nil when the state is readable and holds nothing, and
-  the legacy translation when it holds only the pre-adoption outputs. Delete
-  needs the cluster before it destroys anything — the local SSH configuration
-  is keyed by it — and a `plan` at that moment would be a second chance to
-  change infrastructure on the way to removing it; nor can a fresh clone
-  re-derive it, so the stage is rendered, its backend written and initialized
-  here, before the read. A failed initialization throws the SDK's step error
-  carrying `:dir`, the shape `green.tofu/outputs` throws on an unreadable
-  backend; `read-state` reports both fail-closed."
-  [opts]
-  (let [dir (tool-dir opts infrastructure-tool)
-        credentials (credential-env opts :provider-compute)
-        ;; `tofu/outputs` hands its map straight to the process as the whole
-        ;; environment, so it needs the inherited one merged in; `process/run`
-        ;; adds to the inherited environment and must not be given it twice.
-        env (merge (into {} (System/getenv)) credentials)]
-    (sc/scaffold (assoc opts :green/event :build) (infrastructure-specs opts))
-    ((backend-advice infrastructure-tool) opts)
-    (let [init (process/run ["tofu" (str "-chdir=" dir) "init" "-input=false" "-no-color"]
-                            {:extra-env credentials})]
-      (when-not (zero? (:exit init))
-        (throw (step-error dir "infrastructure state initialization" init))))
-    (let [outputs (tofu/outputs dir env)]
-      (cond
-        (contains? outputs :params) (walk/keywordize-keys (:params outputs))
-        (empty? outputs) nil
-        :else (legacy-params opts outputs dir)))))
-
-(defn load-infrastructure-step
-  "Adopt the cluster out of remote state without planning or mutating cloud
-  resources: ONCE's `adopt-state` over the read `start-step` handed on under
-  `:postgres-ha/state`, or a fresh read when nothing was. An unreadable
-  backend and a partial cluster fail closed; the adopted `params` must then
-  pass `params-errors`. A readable state without a cluster means there is
-  nothing to clean up on a delete."
-  [opts]
-  (let [event (:green/event opts)
-        state (or (:postgres-ha/state opts) (cluster/read-state opts state-output))
-        adopted (cluster/adopt-state validate/spec (dissoc opts :postgres-ha/state) event state)
-        present? (contains? adopted :once/cluster)]
-    (if (wf/failed? adopted)
-      adopted
-      (let [checked (checked adopted)]
-        (if (wf/failed? checked)
-          checked
-          (assoc checked :postgres-ha/infrastructure-present? present?))))))
-
-;; ---------------------------------------------------------------------------
-;; Stage 2 — DNS
-;;
-;; One A record per node, all carrying `cluster-host`. libpq resolves the name
-;; and tries every address it gets back, so a node that is down is skipped by
-;; the client itself: the endpoint survives a failover without any DNS write,
-;; and nothing has to hold a cloud API credential at the moment the cluster is
-;; degraded. See plans/0001 for the alternative that was rejected.
+(defn load-infrastructure-step [opts]
+  (if (or (= :build (:green/event opts)) (:green/dry-run opts)) (infrastructure-step opts)
+      (let [result (inspection/read-deployment opts)]
+        (case (:status result)
+          "destroyed" (assoc opts :postgres-ha/already-destroyed true :green/exit 0)
+          "present" (cond-> (assoc opts :colors-compute/cluster (:cluster result) :colors-compute/shared (:shared result) :postgres-ha/infrastructure-present? true :green/exit 0)
+                      (get-in result [:key :private_key_path]) (assoc :ssh-private-key-path (get-in result [:key :private_key_path])))
+          (refuse opts ["compute state unavailable; legacy monolithic state requires explicit migration"])))))
 
 (defn dns-data
   [opts]
@@ -325,12 +130,15 @@
   [opts]
   (let [opts (ssh/with-machine-key opts)
         ns (nodes opts)
-        facts (merge fallback-outputs
-                     (select-keys (:once/cluster opts) (keys fallback-outputs)))]
+        shared (or (:colors-compute/shared opts)
+                   (when (or (= :build (:green/event opts)) (:green/dry-run opts))
+                     (:shared (planning/plan-deployment opts (compute/topology opts) (compute/requirements opts)))))
+        facts (:params shared)
+        _ (when-not (:network_cidr facts) (throw (ex-info "compute shared network CIDR unavailable" {})))]
     (assoc opts
            :nodes ns
            :first-node (first ns)
-           :vpc-cidr (:vpc_ip_range facts)
+           :vpc-cidr (:network_cidr facts)
            :ssh-private-key (private-key-file opts)
            :backup-r2-s3-endpoint (utils/endpoint-host (:backup-r2-endpoint opts))
            :backup-repo-path (utils/repo-path (:backup-r2-prefix opts))
@@ -354,8 +162,8 @@
   is identical on every workstation (SSH Config Standard §6)."
   [opts]
   (assoc (data-fn opts)
-         :ssh-keygen (validate/keygen? opts)
-         :ssh-config-identity-file (ssh-config/identity-file opts)
+         :ssh-keygen (or (validate/keygen? opts) (boolean (:ssh-private-key-path opts)))
+         :ssh-config-identity-file (if (validate/keygen? opts) (ssh-config/identity-file opts) (or (:ssh-private-key-path opts) ""))
          :host-alias (ssh-config/host-alias opts)))
 
 (defn ansible-local-specs
@@ -371,7 +179,8 @@
   pointing at node 0 (the spec's entry), then one alias per node. ONCE's
   (Compute Cluster Standard §6)."
   [opts]
-  (cluster/ssh-config-hosts validate/spec opts (cluster-nodes opts)))
+  (let [nodes (cluster-nodes opts)]
+    (into [(assoc (first nodes) :name (:profile opts))] (map #(assoc % :name (str (:profile opts) "-" (:index %))) nodes))))
 
 (defn ansible-local-extra-vars
   "What the play cannot know from a `build`: the aliases and addresses,
@@ -405,9 +214,9 @@
   [opts]
   (let [data (data-fn opts)
         hosts (into (sorted-map)
-                    (map (fn [{:keys [name public-ip private-ip ordinal]}]
+                    (map (fn [{:keys [name public-ip private-ip ordinal user]}]
                            [name {:ansible_host public-ip
-                                  :ansible_user "root"
+                                  :ansible_user (or user "root")
                                   :private_ip private-ip
                                   :node_ordinal ordinal}]))
                     (:nodes data))]
