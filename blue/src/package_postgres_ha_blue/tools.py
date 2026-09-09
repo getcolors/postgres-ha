@@ -427,4 +427,8 @@ async def acceptance_step(opts: dict) -> dict:
 
 
 def generated_cleanup_step(opts: dict) -> dict:
-    return scaffold(scaffold(opts, ansible_local_specs(opts)), acceptance_specs(opts))
+    # Delete only known generated targets; retired state has no render facts.
+    if opts.get('blue/event') != 'delete':
+        return opts
+    groups = [(ansible_local_tool, ['ansible.cfg', 'inventory.ini', 'main.yml']), (acceptance_tool, ['acceptance.sh'])]
+    return scaffold(opts, [raw_spec(f"{tool_dir(opts, tool)}/{name}", '') for tool, names in groups for name in names])

@@ -113,11 +113,17 @@
    :postgres-ha/dns :postgres-ha/ansible-local :postgres-ha/cluster
    :postgres-ha/acceptance :postgres-ha/ssh-cleanup :postgres-ha/generated-cleanup])
 
+(defn next-steps [step successors opts]
+  (cond
+    (wf/failed? opts) []
+    (:postgres-ha/already-destroyed opts)
+    (if (and (= :delete (:green/event opts)) (= :postgres-ha/load-infrastructure step))
+      [[:postgres-ha/generated-cleanup opts]] [])
+    :else (mapv #(vector % opts) successors)))
+
 (def workflow
   (-> (wf/workflow {:start :postgres-ha/start :wire-fn wire-fn
-                    :next-fn (fn [_ successors opts]
-                               (if (or (:postgres-ha/already-destroyed opts) (wf/failed? opts)) []
-                                   (mapv #(vector % opts) successors)))})
+                    :next-fn next-steps})
       (wf/advice-add :postgres-ha/dns :before ::backend
                      (backend-advice tools/dns-tool))
       progress/advise

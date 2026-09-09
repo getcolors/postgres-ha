@@ -430,5 +430,8 @@ export async function acceptanceStep(opts: Opts): Promise<Opts> {
 }
 
 export function generatedCleanupStep(opts: Opts): Opts {
-  return scaffold(scaffold(opts, ansibleLocalSpecs(opts)), acceptanceSpecs(opts));
+  if (opts['red/event'] !== 'delete') return opts;
+  // Fixed generated targets require neither live inventory nor a key file.
+  const groups: [string, string[]][] = [[ansibleLocalTool,["ansible.cfg", "inventory.ini", "main.yml"]],[acceptanceTool,["acceptance.sh"]]];
+  return scaffold(opts, groups.flatMap(([tool,names]) => names.map(name => rawSpec(`${toolDir(opts,tool)}/${name}`, ''))));
 }

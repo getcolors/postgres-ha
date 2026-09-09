@@ -95,8 +95,16 @@ export const sideEffectingSteps = [
   "postgres-ha/acceptance", "postgres-ha/ssh-cleanup", "postgres-ha/generated-cleanup",
 ];
 
+export function nextSteps(step: string, successors: string[] | null | undefined, opts: Opts): [string, Opts][] {
+  if (failed(opts)) return [];
+  if (opts['postgres-ha/already-destroyed']) {
+    return opts['red/event'] === 'delete' && step === 'postgres-ha/load-infrastructure' ? [['postgres-ha/generated-cleanup', opts]] : [];
+  }
+  return (successors ?? []).map(successor => [successor, opts]);
+}
+
 function create() {
-  let wf = workflow({ start: "postgres-ha/start", wireFn,nextFn:(_step,next,opts)=>opts["postgres-ha/already-destroyed"]||failed(opts)?[]:(next??[]).map(step=>[step,opts]) });
+  let wf = workflow({ start: "postgres-ha/start", wireFn,nextFn: nextSteps });
   wf = adviceAdd(wf, "postgres-ha/load-infrastructure", "before",
                  "io.github.getcolors.postgres-ha.workflow/backend",
                  backendAdvice(tools.infrastructureTool));

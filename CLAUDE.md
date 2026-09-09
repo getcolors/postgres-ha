@@ -136,3 +136,11 @@ paths already encode the repository. Never add one tag without the other.
 ## Git
 
 Work on the current branch. Do not commit or push unless explicitly asked.
+
+### Repeated deletion after compute retirement
+
+A repeated `delete` with validated retired compute ownership resumes only the
+local generated-file cleanup. It does not require removed SSH keys or contact
+the former hosts, DNS, registry, or other application cloud resources. Failed
+ownership inspection still stops deletion. Local cleanup preserves unrelated
+files and is safe to repeat.

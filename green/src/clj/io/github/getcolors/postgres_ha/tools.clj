@@ -320,8 +320,10 @@
         (when-let [out (not-empty (str (:out result)))] (println out))
         (process-result rendered "acceptance" result)))))
 
-(defn generated-cleanup-step
-  [opts]
-  (-> opts
-      (sc/scaffold (ansible-local-specs opts))
-      (sc/scaffold (acceptance-specs opts))))
+(defn generated-cleanup-step [opts]
+  ;; Fixed generated targets need no inventory or removed SSH identity.
+  (if (= :delete (:green/event opts))
+    (sc/scaffold opts
+      (vec (for [[tool names] [[ansible-local-tool ["ansible.cfg" "inventory.ini" "main.yml"]] [acceptance-tool ["acceptance.sh"]]] name names]
+        (raw-spec (str (tool-dir opts tool) "/" name) ""))))
+    opts))

@@ -95,3 +95,11 @@ succeeded, two thirds in ~80 ms and one third in ~5.1 s.
 Clients that want a second layer of protection can add
 `target_session_attrs=read-write` to the connection string; it is compatible
 with, not a replacement for, the HAProxy endpoint.
+
+### Repeated deletion after compute retirement
+
+A repeated `delete` with validated retired compute ownership resumes only the
+local generated-file cleanup. It does not require removed SSH keys or contact
+the former hosts, DNS, registry, or other application cloud resources. Failed
+ownership inspection still stops deletion. Local cleanup preserves unrelated
+files and is safe to repeat.
