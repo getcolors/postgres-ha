@@ -5,14 +5,14 @@ description = "Blue/Python implementation of the postgres-ha package"
 requires-python = ">=3.11"
 dependencies = [
     "blue",
-    "colors-compute-blue @ git+https://github.com/getcolors/colors-compute.git@85bf076dfe2c34025dc9362f1cc4c5bc92a4373d#subdirectory=blue",
+    "colors-compute-blue @ git+https://github.com/getcolors/colors-compute.git@ae28ea74962bb1897fa6365c143c1d43ac1fe095#subdirectory=blue",
     "package-once-blue",
 ]
 
 [tool.uv.sources]
 package-once-blue = { git = "https://github.com/getcolors/once.git", subdirectory = "blue", rev = "10e525ae7c37130ab4d532b91c8d2ead94557cc8" }
 blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
-colors-compute-blue = { git = "https://github.com/getcolors/colors-compute.git", subdirectory = "blue", rev = "85bf076dfe2c34025dc9362f1cc4c5bc92a4373d" }
+colors-compute-blue = { git = "https://github.com/getcolors/colors-compute.git", subdirectory = "blue", rev = "ae28ea74962bb1897fa6365c143c1d43ac1fe095" }
 
 # Keep the package SDK pin authoritative across dependencies.
 [tool.uv]

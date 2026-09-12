@@ -1,5 +1,5 @@
 {:paths ["src/clj" "src/resources"]
- :deps {io.github.getcolors/colors-compute {:git/url "https://github.com/getcolors/colors-compute.git" :git/sha "85bf076dfe2c34025dc9362f1cc4c5bc92a4373d" :deps/root "green"}
+ :deps {io.github.getcolors/colors-compute {:git/url "https://github.com/getcolors/colors-compute.git" :git/sha "ae28ea74962bb1897fa6365c143c1d43ac1fe095" :deps/root "green"}
         org.clojure/clojure {:mvn/version "1.12.5"}
         ;; ONCE remains for application DNS helpers.
         io.github.getcolors/green {:git/url "https://github.com/getcolors/green.git"

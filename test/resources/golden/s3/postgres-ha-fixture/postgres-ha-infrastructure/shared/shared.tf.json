@@ -2,6 +2,14 @@
   "data": {
     "digitalocean_vpc": {
       "network": {
+        "lifecycle": {
+          "postcondition": [
+            {
+              "condition": "${self.default}",
+              "error_message": "Regional discovery must return the default VPC."
+            }
+          ]
+        },
         "region": "ams3"
       }
     }

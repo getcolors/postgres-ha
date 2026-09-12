@@ -65,7 +65,7 @@
 (deftest only-the-providers-this-package-implements-are-accepted
   (is (has? (errors {:provider-compute "hcloud"}) #":hcloud-image is required"))
   (is (has? (errors {:provider-dns "yandex"}) #"unsupported :provider-dns"))
-  (is (has? (errors {:provider-backend "gcs"}) #"unsupported :provider-backend")))
+  (is (has? (errors {:provider-backend "azure"}) #"unsupported :provider-backend")))
 
 (deftest ports-that-share-an-address-must-differ
   (testing "the primary listener deliberately reuses the PostgreSQL port,

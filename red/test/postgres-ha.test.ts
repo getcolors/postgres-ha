@@ -111,7 +111,7 @@ describe("validate", () => {
   test("only the providers this package implements are accepted", () => {
     expect(has(errors({ "provider-compute": "hcloud" }), /:hcloud-/)).toBe(true);
     expect(has(errors({ "provider-dns": "yandex" }), /unsupported :provider-dns/)).toBe(true);
-    expect(has(errors({ "provider-backend": "gcs" }), /unsupported :provider-backend/)).toBe(true);
+    expect(has(errors({ "provider-backend": "azure" }), /unsupported :provider-backend/)).toBe(true);
   });
 
   test("ports that share an address must differ", () => {
